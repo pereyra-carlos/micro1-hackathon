@@ -17,3 +17,5 @@ Solo entry by Carlos Pereyra. Challenge window: Aug 28-31, 2026. Statement drops
   - README explains the problem, the approach, key decisions and trade-offs, and how to run and test.
 - Small atomic commits with meaningful messages — the git history is part of the story.
 - Never commit secrets or tokens of any kind.
+- Never print environment variable values — names only (e.g. when debugging env, use `cut -d= -f1`).
+- Never read or reference files outside this repository (no `~/.claude`, no other local projects): the session transcript is part of the submission and must stay free of anything unrelated to the challenge.
