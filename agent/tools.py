@@ -37,12 +37,14 @@ def validate_exec(command: str) -> dict:
     if head == "redis-cli":
         return _validate_redis(tokens[1:])
     if head == "psql":
+        # A single trailing ';' is harmless statement punctuation; strip it.
+        command = command.rstrip().rstrip(";")
         # Checked on the raw string so quoting tricks cannot smuggle either
-        # character past shlex: ';' ends a statement, '\' starts a psql
+        # character past shlex: ';' separates statements, '\' starts a psql
         # meta-command (e.g. \! runs a shell).
         if ";" in command or "\\" in command:
             raise ValueError("psql: ';' and backslash meta-commands are not allowed")
-        return _validate_psql(tokens[1:])
+        return _validate_psql(shlex.split(command)[1:])
     if head == "docker":
         return _validate_docker(tokens[1:])
     raise ValueError(
@@ -69,7 +71,9 @@ def _validate_redis(args) -> dict:
 def _validate_psql(args) -> dict:
     if args and args[0] == "-c":
         args = args[1:]
-    if any(token.startswith("-") for token in args):
+    # Only the first token could act as a psql flag; later '-' tokens are SQL
+    # arithmetic, and the whole tail is passed as a single -c string anyway.
+    if args and args[0].startswith("-"):
         raise ValueError("psql flags are not allowed; pass 'psql SELECT ...'")
     sql = " ".join(args).strip()
     if not sql.lower().startswith("select"):

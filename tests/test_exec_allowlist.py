@@ -15,6 +15,8 @@ from agent.tools import validate_exec
     "psql SELECT count(*) FROM orders",
     "psql -c 'SELECT * FROM reports ORDER BY created_at DESC LIMIT 5'",
     "psql \"select now() - max(created_at) from reports\"",
+    "psql SELECT now() - max(created_at) FROM reports",
+    "psql SELECT count(*) FROM orders;",
     "docker inspect redis",
     "docker stats",
     "docker stats --no-stream api",
