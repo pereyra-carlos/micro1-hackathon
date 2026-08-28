@@ -77,7 +77,15 @@ the git history is the pre-registration evidence.
 
 | Version | Change | postgres-down (agent) | redis-oom (agent) | Overall agent | Overall baseline |
 | --- | --- | --- | --- | --- | --- |
-| v0 | Initial agent, pre-registered eval | _pending first run_ | _pending first run_ | _pending_ | _pending_ |
+| v0 | Initial agent, pre-registered eval | 3/3 | 3/3 | **6/6** | 4/6 |
+
+First full run: `results/20260828-172003/` (model `claude-sonnet-5`, N=3).
+The baseline aces the single-hop control (3/3) but goes 1/3 on the multi-hop
+case, twice misattributing the latency to an api code bug; the agent found
+the redis misconfiguration in all six runs, at ~2× the wall-clock and ~4×
+the tokens of the baseline. Per-run detail, including one baseline run that
+correctly guessed redis from the dump's silences, is in `results.json`;
+every agent investigation is replayable from `trajectories/`.
 
 ## Key decisions and trade-offs
 
@@ -163,6 +171,7 @@ separate planning/review session.
 
 ## Status
 
-Day 1: lab, two cases, frozen baseline, agent v0, pre-registered eval
-harness. Next: first full eval run populates the Baseline row above; later
-days iterate on the agent only, adding cases and changelog rows.
+Day 1 complete: lab, two cases, frozen baseline, agent v0, pre-registered
+eval harness, and the first full eval run (agent 6/6 vs baseline 4/6).
+Later days iterate on the agent only — more cases (at least half unsolvable
+from the dump), agent improvements, one changelog row per change.
