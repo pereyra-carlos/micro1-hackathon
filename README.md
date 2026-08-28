@@ -53,13 +53,20 @@ alert ──► baseline: ONE Claude call over a standard evidence dump ──�
 This section and the harness were committed **before** the first eval run;
 the git history is the pre-registration evidence.
 
-- **Cases:** `postgres-down` (single-hop control: the cause is visible in the
-  evidence dump) and `redis-oom` (multi-hop: redis at maxmemory with
-  noeviction; the api silently degrades to slow synchronous processing, so
-  the only symptom is latency and **no service log contains the cause** —
-  verified at injection time: zero OOM mentions in api/worker logs). Design
-  rule going forward: at least half of all cases must be unsolvable from the
-  initial evidence dump alone.
+- **Cases (eval set v2, frozen 2026-08-28):** six cases, each verified live
+  at design time (symptom present, evidence reachable by the agent's tools,
+  and absent or misleading in the dump where intended). At least half are
+  unsolvable from the initial evidence dump alone; two pairs share identical
+  alert text so the alert never identifies the case.
+
+  | Case | Root cause (component/type) | Solvable from dump? |
+  | --- | --- | --- |
+  | postgres-down | postgres / process_down | yes — control |
+  | pg-connections | postgres / resource_exhaustion | yes — control ("too many clients" in api logs) |
+  | api-dns | api / network | misleading — api logs mimic postgres-down; postgres is healthy |
+  | redis-oom | redis / resource_exhaustion | no — no service log contains the cause |
+  | worker-oom | worker / resource_exhaustion | no — SIGKILL leaves no log; cause only in docker inspect |
+  | worker-wrong-queue | worker / misconfiguration | no — worker Up and silent; drift only in inspect Env / redis keys |
 - **Metric:** a diagnosis is **correct** iff `root_cause_component` matches
   ground truth exactly AND `root_cause_type` is in the case's declared
   `accepted_fault_types`. Component-only accuracy is also recorded.
@@ -79,7 +86,10 @@ the git history is the pre-registration evidence.
 | --- | --- | --- | --- | --- | --- |
 | v0 | Initial agent, pre-registered eval | 3/3 | 3/3 | **6/6** | 4/6 |
 
-First full run: `results/20260828-172003/` (model `claude-sonnet-5`, N=3).
+| v0 + psql-tool fix | Eval set v2: 6 cases (4 new), frozen | _running_ | _running_ | _running_ | _running_ |
+
+First full run (eval set v1, 2 cases): `results/20260828-172003/`
+(model `claude-sonnet-5`, N=3).
 The baseline aces the single-hop control (3/3) but goes 1/3 on the multi-hop
 case, twice misattributing the latency to an api code bug; the agent found
 the redis misconfiguration in all six runs, at ~2× the wall-clock and ~4×
