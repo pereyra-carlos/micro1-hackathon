@@ -13,7 +13,7 @@ log = logging.getLogger("worker")
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 REDIS_URL = os.environ["REDIS_URL"]
-QUEUE_KEY = "jobs"
+QUEUE_KEY = os.environ.get("QUEUE_KEY", "jobs")
 
 
 def db_conn():
@@ -24,7 +24,7 @@ def main():
     rdb = redis.Redis.from_url(
         REDIS_URL, socket_timeout=10, socket_connect_timeout=2, decode_responses=True
     )
-    log.info("worker started, consuming queue %r", QUEUE_KEY)
+    log.info("worker started")
     while True:
         try:
             item = rdb.blpop(QUEUE_KEY, timeout=5)

@@ -43,9 +43,11 @@ services:
   worker:
     build: ./app
     command: python worker.py
+    restart: on-failure
     environment:
       DATABASE_URL: postgresql://app:lab_password@postgres:5432/shop
       REDIS_URL: redis://redis:6379/0
+      QUEUE_KEY: ${WORKER_QUEUE_KEY:-jobs}
     depends_on:
       postgres:
         condition: service_healthy
