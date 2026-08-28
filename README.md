@@ -82,20 +82,22 @@ the git history is the pre-registration evidence.
 
 ## Improvement Changelog
 
-| Version | Change | postgres-down (agent) | redis-oom (agent) | Overall agent | Overall baseline |
+| Version | Change | Eval set | Agent | Baseline | Results |
 | --- | --- | --- | --- | --- | --- |
-| v0 | Initial agent, pre-registered eval | 3/3 | 3/3 | **6/6** | 4/6 |
+| v0 | Initial agent, pre-registered eval | v1 (2 cases) | **6/6** | 4/6 | `results/20260828-172003/` |
+| v0 + psql-tool fix | Eval set v2: 6 cases (4 new), frozen | v2 (6 cases) | **15/18** | 12/18 | `results/20260828-205644/` |
 
-| v0 + psql-tool fix | Eval set v2: 6 cases (4 new), frozen | _running_ | _running_ | _running_ | _running_ |
-
-First full run (eval set v1, 2 cases): `results/20260828-172003/`
-(model `claude-sonnet-5`, N=3).
-The baseline aces the single-hop control (3/3) but goes 1/3 on the multi-hop
-case, twice misattributing the latency to an api code bug; the agent found
-the redis misconfiguration in all six runs, at ~2× the wall-clock and ~4×
-the tokens of the baseline. Per-run detail, including one baseline run that
-correctly guessed redis from the dump's silences, is in `results.json`;
-every agent investigation is replayable from `trajectories/`.
+All runs: model `claude-sonnet-5`, N=3 per case per system. On v2 the agent
+sweeps every dump-unsolvable case (redis-oom, worker-oom, worker-wrong-queue:
+9/9 vs the baseline's 5/9) but drops points on api-dns (1/3), where it
+over-attributes to `api/code_bug` after reading source lines leaked by
+tracebacks — the sharpest signal for the next agent iteration. The baseline's
+failures cluster on exactly the cases designed to need investigation.
+`results/20260828-200028/` is an intermediate sweep kept for the record: it
+exposed that the original pg-connections design made the ground truth
+undiscoverable (agent 0/3), which forced the case redesign (break-glass
+diagnostics) before the v2 freeze — the redesign is a case fix, not an agent
+improvement. Every agent investigation is replayable from `trajectories/`.
 
 ## Key decisions and trade-offs
 
@@ -181,7 +183,8 @@ separate planning/review session.
 
 ## Status
 
-Day 1 complete: lab, two cases, frozen baseline, agent v0, pre-registered
-eval harness, and the first full eval run (agent 6/6 vs baseline 4/6).
-Later days iterate on the agent only — more cases (at least half unsolvable
-from the dump), agent improvements, one changelog row per change.
+Day 1 complete: lab, eval set v2 (6 cases, frozen), frozen baseline, agent
+v0, pre-registered harness, and the v2 baseline numbers (agent 15/18 vs
+baseline 12/18). Next: iterate on the agent only, one changelog row per
+change — first target is the api-dns failure mode (trusting leaked
+traceback source over direct state checks).
