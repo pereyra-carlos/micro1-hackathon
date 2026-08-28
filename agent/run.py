@@ -33,6 +33,13 @@ Method:
 - Logs can be silent about the cause. The absence of errors in a service does
   not clear its dependencies -- inspect their state directly (redis INFO and
   CONFIG GET, SQL queries, docker inspect).
+- Distinguish code you can see from faults you can verify. Tracebacks in logs
+  quote application source; treat that code as showing where symptoms
+  surface, never as proof of a code defect. Diagnose code_bug only after
+  direct state checks have ruled out process, configuration, resource, and
+  network faults on the failing path; when two explanations fit the same
+  symptoms, prefer the one backed by state you verified with tools over one
+  inferred from reading code.
 
 You have a budget of at most {MAX_LLM_CALLS} investigation steps. When you can
 explain the causal chain, call submit_diagnosis exactly once. Evidence must be
