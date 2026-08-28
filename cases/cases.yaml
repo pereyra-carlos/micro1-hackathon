@@ -53,3 +53,93 @@ cases:
       component: redis
       fault_type: resource_exhaustion
       accepted_fault_types: [resource_exhaustion, misconfiguration]
+
+  - id: pg-connections
+    description: >-
+      Single-hop control case: all 100 postgres connection slots are occupied
+      by leaked long-running sessions (SELECT pg_sleep held open). Every new
+      connection -- api, worker, even the agent's read-only psql -- fails with
+      "sorry, too many clients already", so the cause is named verbatim in the
+      api logs and the standard dump suffices.
+    alert: >-
+      [ALERT] HighErrorRate: 5xx responses on GET /orders exceeded 50% over
+      the last 2 minutes (normal: 0%). Service: shop API, env: lab.
+    injection:
+      - >-
+        docker compose -f lab/docker-compose.yml exec -dT postgres sh -c
+        'for i in $(seq 1 110); do
+        psql -U app -d shop -Atc "SELECT pg_sleep(3600)" </dev/null >/dev/null 2>&1 &
+        done; wait'
+    settle_seconds: 25
+    ground_truth:
+      component: postgres
+      fault_type: resource_exhaustion
+      accepted_fault_types: [resource_exhaustion]
+
+  - id: api-dns
+    description: >-
+      Misleading-dump case: the api container's resolver is pointed at a
+      blackhole nameserver. Fresh postgres connections fail with "Temporary
+      failure in name resolution" -- the same api-log signature as
+      postgres-down -- but compose ps shows postgres healthy and long-lived
+      redis connections keep working, so POST /jobs is unaffected. The dump
+      suggests postgres; direct checks (psql works from inside the network,
+      postgres healthy) exonerate it and point at the api's own name
+      resolution. Alert text is intentionally identical to postgres-down.
+    alert: >-
+      [ALERT] HighErrorRate: 5xx responses on GET /orders exceeded 50% over
+      the last 2 minutes (normal: 0%). Service: shop API, env: lab.
+    injection:
+      - >-
+        docker compose -f lab/docker-compose.yml exec -T api sh -c
+        'echo "nameserver 10.255.255.1" > /etc/resolv.conf'
+    settle_seconds: 25
+    ground_truth:
+      component: api
+      fault_type: network
+      accepted_fault_types: [network, misconfiguration]
+
+  - id: worker-oom
+    description: >-
+      Multi-hop case: the worker container's memory limit is dropped to 20MB
+      at runtime, far below the Python process footprint, so the kernel
+      OOM-kills it on startup and restart:on-failure turns it into a crash
+      loop. Worker logs show only clean startup lines (SIGKILL leaves no
+      trace), so the dump shows a restarting service with no error; the cause
+      (OOMKilled=true, Memory=20971520) is visible only via docker inspect.
+    alert: >-
+      [ALERT] QueueBacklog: redis list 'jobs' depth is growing steadily and
+      no new reports have been written for several minutes (normal:
+      continuous). Service: report worker, env: lab.
+    injection:
+      - >-
+        docker update --memory 20m --memory-swap 20m
+        $(docker compose -f lab/docker-compose.yml ps -q worker)
+    settle_seconds: 40
+    ground_truth:
+      component: worker
+      fault_type: resource_exhaustion
+      accepted_fault_types: [resource_exhaustion, misconfiguration]
+
+  - id: worker-wrong-queue
+    description: >-
+      Multi-hop config-drift case: the worker is redeployed consuming
+      'jobs-reporting' while the api still enqueues to 'jobs'. The worker is
+      Up, healthy and silent (BRPOP on an empty list), producing no errors
+      anywhere; the queue backs up. The drift is discoverable only by
+      comparing the worker's QUEUE_KEY env (docker inspect) or redis key
+      state (llen jobs growing, jobs-reporting absent) with the intended
+      queue. Alert text is intentionally identical to worker-oom.
+    alert: >-
+      [ALERT] QueueBacklog: redis list 'jobs' depth is growing steadily and
+      no new reports have been written for several minutes (normal:
+      continuous). Service: report worker, env: lab.
+    injection:
+      - >-
+        WORKER_QUEUE_KEY=jobs-reporting
+        docker compose -f lab/docker-compose.yml up -d worker
+    settle_seconds: 40
+    ground_truth:
+      component: worker
+      fault_type: misconfiguration
+      accepted_fault_types: [misconfiguration]
