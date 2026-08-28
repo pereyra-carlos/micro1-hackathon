@@ -8,7 +8,9 @@
 
 SHELL := /bin/bash
 
-.PHONY: help setup test run up down clean
+SANDBOX_IMAGE := micro1-sandbox
+
+.PHONY: help setup test run up down clean validate
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -28,6 +30,11 @@ up: ## Bring the whole stack up (docker compose)
 
 down: ## Tear the stack down
 	@echo "TODO: docker compose down -v"
+
+validate: ## Run setup+test+run on HEAD inside a disposable container
+	@docker image inspect $(SANDBOX_IMAGE) >/dev/null 2>&1 \
+		|| docker build -f sandbox.Dockerfile -t $(SANDBOX_IMAGE) .
+	@SANDBOX_IMAGE=$(SANDBOX_IMAGE) ./scripts/validate.sh
 
 clean: ## Remove build artifacts and caches
 	@echo "TODO: remove build artifacts and caches"
