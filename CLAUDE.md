@@ -32,7 +32,7 @@ Solo entry by Carlos Pereyra. Challenge window: Aug 28-31, 2026. Statement drops
 
 ## Delivery checklist (before submitting)
 
-- `make setup && make test && make run` works from a fresh clone in a clean environment (a container if the stack allows).
+- `make validate` passes: it runs `make setup && make test && make run` on the committed HEAD inside a disposable container (`sandbox.Dockerfile` + `scripts/validate.sh`), so it proves the judges' clone works. If the solution becomes compose-based, switch validation to a fresh clone in a host temp dir (`make up` + smoke test + `make down`) instead of container-in-container.
 - README covers: problem, approach, key decisions and trade-offs, explicit assumptions, how to run and test. Anything not tested is declared as such — never imply coverage that does not exist.
 - Every edge case named in the statement has a test, or a documented reason why not.
 - Re-read the full statement and confirm each requirement is addressed or consciously descoped in writing.
