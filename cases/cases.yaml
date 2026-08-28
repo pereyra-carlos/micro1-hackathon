@@ -1,0 +1,55 @@
+# Fault case registry. Each case defines how to break the lab, the alert an
+# on-call engineer would receive, and the canonical root cause used for
+# automatic grading.
+#
+# Grading enums:
+#   component:  nginx | api | worker | postgres | redis | other
+#   fault_type: process_down | misconfiguration | resource_exhaustion
+#             | network | code_bug | other
+#
+# Design rule: at least half of all cases must be unsolvable from the initial
+# evidence dump alone (status + recent logs) so that investigation is required.
+
+cases:
+  - id: postgres-down
+    description: >-
+      Single-hop control case: the postgres container is killed outright.
+      The api starts returning 500s on /orders and its logs show connection
+      failures, so the cause is visible in the standard evidence dump.
+    alert: >-
+      [ALERT] HighErrorRate: 5xx responses on GET /orders exceeded 50% over
+      the last 2 minutes (normal: 0%). Service: shop API, env: lab.
+    injection:
+      - docker compose -f lab/docker-compose.yml kill postgres
+    settle_seconds: 25
+    ground_truth:
+      component: postgres
+      fault_type: process_down
+      accepted_fault_types: [process_down]
+
+  - id: redis-oom
+    description: >-
+      Multi-hop case: redis is left with a session cache that grew to ~10MB
+      and a maxmemory limit of 8MB with noeviction, so every write is denied.
+      The api silently falls back to slow synchronous processing (its
+      graceful-degradation path), so the only symptom is high latency on
+      POST /jobs. No service log contains the root cause; it is discoverable
+      only by inspecting redis (INFO memory / errorstats, CONFIG GET).
+    alert: >-
+      [ALERT] HighLatency: p95 latency on POST /jobs rose above 2s
+      (normal: <100ms) over the last 2 minutes. Error rate normal.
+      Service: shop API, env: lab.
+    injection:
+      - >-
+        docker compose -f lab/docker-compose.yml exec -T redis sh -c
+        'redis-cli config set maxmemory-policy noeviction >/dev/null &&
+        for i in $(seq 1 24); do
+        head -c 400000 /dev/zero | tr "\0" x | redis-cli -x set cache:session:$i >/dev/null;
+        done &&
+        redis-cli config set maxmemory 8mb >/dev/null &&
+        redis-cli info memory | grep -E "used_memory_human|maxmemory_human|maxmemory_policy"'
+    settle_seconds: 30
+    ground_truth:
+      component: redis
+      fault_type: resource_exhaustion
+      accepted_fault_types: [resource_exhaustion, misconfiguration]
