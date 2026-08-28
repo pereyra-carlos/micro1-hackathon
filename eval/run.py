@@ -82,7 +82,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument("--case", help="run a single case id")
+    parser.add_argument("--systems", default="baseline,agent",
+                        help="comma-separated subset of: baseline,agent")
     args = parser.parse_args()
+    systems = [s.strip() for s in args.systems.split(",") if s.strip()]
+    if not systems or any(s not in ("baseline", "agent") for s in systems):
+        parser.error("--systems must be a comma-separated subset of: baseline,agent")
 
     cases = lab.load_cases()
     if args.case:
@@ -95,6 +100,7 @@ def main():
         "model": llm.MODEL,
         "repetitions": args.repetitions,
         "cases": list(cases),
+        "systems": systems,
         "started": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
 
@@ -104,7 +110,7 @@ def main():
             print(f"\neval: === case {case['id']} rep {rep + 1}/{args.repetitions} ===",
                   flush=True)
             reset_and_break(case)
-            for system in ("baseline", "agent"):
+            for system in systems:
                 row = run_one(case, system)
                 row["repetition"] = rep
                 rows.append(row)
