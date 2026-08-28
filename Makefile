@@ -1,40 +1,54 @@
-# micro1 Frontier Engineering Challenge 2026
-#
-# Placeholder targets. The real commands land once the challenge statement
-# drops and the stack is chosen. Keep the target names stable so the README
-# and CI never have to change.
+# incident-copilot — agentic root-cause diagnosis measured against a baseline.
 
 .DEFAULT_GOAL := help
 
 SHELL := /bin/bash
 
-SANDBOX_IMAGE := micro1-sandbox
+COMPOSE := docker compose -f lab/docker-compose.yml
+VENV := .venv
+PY := $(VENV)/bin/python
+CASE ?=
+N ?= 3
 
-.PHONY: help setup test run up down clean validate
+.PHONY: help setup test up down reset break smoke run eval validate clean
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
 
-setup: ## Install dependencies from a clean clone
-	@echo "TODO: install dependencies (package manager / virtualenv / docker build)"
+setup: ## Create the virtualenv and install host-side dependencies
+	python3 -m venv $(VENV)
+	$(VENV)/bin/pip install --quiet --upgrade pip
+	$(VENV)/bin/pip install --quiet -r requirements.txt
 
-test: ## Run the full test suite
-	@echo "TODO: run the test suite"
+test: ## Run the test suite (no API key or running lab required)
+	$(PY) -m pytest -q
 
-run: ## Run the application locally
-	@echo "TODO: start the application"
+up: ## Build and start the synthetic lab, wait until healthy
+	$(COMPOSE) up -d --build --wait
 
-up: ## Bring the whole stack up (docker compose)
-	@echo "TODO: docker compose up --build"
+down: ## Tear the lab down, removing volumes
+	$(COMPOSE) down -v --remove-orphans
 
-down: ## Tear the stack down
-	@echo "TODO: docker compose down -v"
+reset: down up ## Recreate the lab from scratch (deterministic clean state)
 
-validate: ## Run setup+test+run on HEAD inside a disposable container
-	@docker image inspect $(SANDBOX_IMAGE) >/dev/null 2>&1 \
-		|| docker build -f sandbox.Dockerfile -t $(SANDBOX_IMAGE) .
-	@SANDBOX_IMAGE=$(SANDBOX_IMAGE) ./scripts/validate.sh
+break: ## Inject a fault: make break CASE=<id>
+	@test -n "$(CASE)" || (echo "usage: make break CASE=<id>" && exit 1)
+	$(PY) scripts/break.py $(CASE)
 
-clean: ## Remove build artifacts and caches
-	@echo "TODO: remove build artifacts and caches"
+smoke: ## Verify the healthy lab end to end
+	./scripts/smoke.sh
+
+run: ## Diagnose the current lab state with the agent: make run CASE=<id>
+	@test -n "$(CASE)" || (echo "usage: make run CASE=<id>" && exit 1)
+	$(PY) -m agent.run $(CASE)
+
+eval: ## Full evaluation: N repetitions of every case, baseline vs agent
+	$(PY) -m eval.run --repetitions $(N)
+
+validate: ## Prove a fresh clone works: setup+test+up+smoke+down in a temp dir
+	./scripts/validate.sh
+
+clean: down ## Tear down the lab and remove local artifacts
+	rm -rf $(VENV) .pytest_cache
+	find . -name __pycache__ -type d -prune -exec rm -rf {} +

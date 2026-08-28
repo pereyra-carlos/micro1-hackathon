@@ -1,0 +1,77 @@
+name: incident-lab
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: lab_password # synthetic lab credential, not a secret
+      POSTGRES_DB: shop
+    volumes:
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d shop"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build: ./app
+    command: uvicorn api:app --host 0.0.0.0 --port 8000 --no-access-log
+    environment:
+      DATABASE_URL: postgresql://app:lab_password@postgres:5432/shop
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+
+  worker:
+    build: ./app
+    command: python worker.py
+    environment:
+      DATABASE_URL: postgresql://app:lab_password@postgres:5432/shop
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  nginx:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "${LAB_HTTP_PORT:-18080}:80"
+    depends_on:
+      api:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/nginx-health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  loadgen:
+    image: curlimages/curl:8.10.1
+    volumes:
+      - ./loadgen/loadgen.sh:/loadgen.sh:ro
+    entrypoint: ["sh", "/loadgen.sh"]
+    depends_on:
+      nginx:
+        condition: service_started
