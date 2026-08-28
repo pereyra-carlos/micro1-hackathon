@@ -62,7 +62,7 @@ the git history is the pre-registration evidence.
   | Case | Root cause (component/type) | Solvable from dump? |
   | --- | --- | --- |
   | postgres-down | postgres / process_down | yes — control |
-  | pg-connections | postgres / resource_exhaustion | yes — control ("too many clients" in api logs) |
+  | pg-connections | postgres / resource_exhaustion | yes — control ("connection slots are reserved" in api logs; leaked sessions attributable via break-glass pg_stat_activity) |
   | api-dns | api / network | misleading — api logs mimic postgres-down; postgres is healthy |
   | redis-oom | redis / resource_exhaustion | no — no service log contains the cause |
   | worker-oom | worker / resource_exhaustion | no — SIGKILL leaves no log; cause only in docker inspect |

@@ -56,20 +56,24 @@ cases:
 
   - id: pg-connections
     description: >-
-      Single-hop control case: all 100 postgres connection slots are occupied
-      by leaked long-running sessions (SELECT pg_sleep held open). Every new
-      connection -- api, worker, even the agent's read-only psql -- fails with
-      "sorry, too many clients already", so the cause is named verbatim in the
-      api logs and the standard dump suffices.
+      Single-hop control case: a batch client leaks long-running sessions
+      (SELECT pg_sleep held open) until every non-reserved postgres slot is
+      occupied. The api and worker (regular svc role) fail with a verbatim
+      "connection slots are reserved" FATAL in their logs, so the dump names
+      the cause. The agent's readonly role holds pg_use_reserved_connections
+      (break-glass access), so pg_stat_activity remains queryable and shows
+      the leaked batch sessions -- making the attribution (postgres slots
+      exhausted by an external client, not an api leak) discoverable.
     alert: >-
       [ALERT] HighErrorRate: 5xx responses on GET /orders exceeded 50% over
       the last 2 minutes (normal: 0%). Service: shop API, env: lab.
     injection:
       - >-
         docker compose -f lab/docker-compose.yml exec -dT postgres sh -c
-        'for i in $(seq 1 110); do
-        psql -U app -d shop -Atc "SELECT pg_sleep(3600)" </dev/null >/dev/null 2>&1 &
-        done; wait'
+        'for wave in 1 2 3; do
+        for i in $(seq 1 40); do
+        psql -U batch -d shop -Atc "SELECT pg_sleep(3600)" </dev/null >/dev/null 2>&1 &
+        done; sleep 3; done; wait'
     settle_seconds: 25
     ground_truth:
       component: postgres

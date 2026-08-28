@@ -3,6 +3,7 @@ name: incident-lab
 services:
   postgres:
     image: postgres:16-alpine
+    command: postgres -c reserved_connections=3
     environment:
       POSTGRES_USER: app
       POSTGRES_PASSWORD: lab_password # synthetic lab credential, not a secret
@@ -27,7 +28,7 @@ services:
     build: ./app
     command: uvicorn api:app --host 0.0.0.0 --port 8000 --no-access-log
     environment:
-      DATABASE_URL: postgresql://app:lab_password@postgres:5432/shop
+      DATABASE_URL: postgresql://svc:svc_password@postgres:5432/shop
       REDIS_URL: redis://redis:6379/0
     depends_on:
       postgres:
@@ -45,7 +46,7 @@ services:
     command: python worker.py
     restart: on-failure
     environment:
-      DATABASE_URL: postgresql://app:lab_password@postgres:5432/shop
+      DATABASE_URL: postgresql://svc:svc_password@postgres:5432/shop
       REDIS_URL: redis://redis:6379/0
       QUEUE_KEY: ${WORKER_QUEUE_KEY:-jobs}
     depends_on:
