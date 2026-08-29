@@ -197,6 +197,12 @@ improvement. Every agent investigation is replayable from `trajectories/`.
 - The lab's hardcoded passwords are synthetic fixtures, not secrets.
 - Agent budget: at most 12 LLM calls per run; at the last step it is told to
   commit to a diagnosis.
+- Two case candidates were considered and consciously skipped: **postgres
+  disk-full** (near-duplicate of pg-connections — same component, same
+  fault_type, same discovery path — and it needs tmpfs surgery on the data
+  volume) and **dropped-index slow query** (the 12-row lab cannot produce
+  alert-scale latency without a table large enough to inflate every one of
+  the ~18 lab resets per sweep by minutes).
 
 ## Getting started
 
