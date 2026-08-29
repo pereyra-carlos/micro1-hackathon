@@ -24,7 +24,8 @@ pressure, and that time is the core of MTTR.
 
 ```
 alert ──► baseline: ONE Claude call over a standard evidence dump ──► diagnosis
-      └─► agent:    tool-use loop (get_status / get_logs / exec_readonly) ──► diagnosis
+      └─► agent:    tool-use loop (get_status / get_logs / exec_readonly
+                    / probe_connectivity)                            ──► diagnosis
                                     both graded against cases.yaml ground truth
 ```
 
@@ -40,9 +41,13 @@ alert ──► baseline: ONE Claude call over a standard evidence dump ──�
    a well-written prompt, and the standard evidence dump (`docker compose ps`
    + last 200 log lines of every service + the alert). **Frozen after day 1**;
    it is never improved later.
-4. **Agent** (`agent/`): a minimal tool-use loop with read-only tools. Every
-   step is appended to `trajectories/<case>/<run-id>.jsonl`. The suggested fix
-   is only suggested — never executed (human-approval boundary).
+4. **Agent** (`agent/`): a minimal tool-use loop with read-only tools —
+   `get_status`, `get_logs`, `exec_readonly` (allowlisted redis-cli/psql/
+   docker inspect), and since v2 `probe_connectivity` (DNS + TCP checks from
+   inside a chosen container). Every step is appended to
+   `trajectories/<case>/<run-id>.jsonl`, with a readable `.md` rendering
+   beside it (`make render`). The suggested fix is only suggested — never
+   executed (human-approval boundary).
 5. **Eval harness** (`eval/`): resets the lab, injects the fault, runs both
    systems against the same broken instance, grades the structured enums
    against ground truth, and records accuracy, wall-clock and tokens into
@@ -89,12 +94,18 @@ the git history is the pre-registration evidence.
 | v1 — **reverted** | Prompt rule: prefer verified state over traceback-inferred code | v2 (agent only; baseline frozen) | 14/18 | (12/18) | `results/20260829-v1-agent/` |
 | v2 | New tool: probe_connectivity (DNS + TCP from inside a container) | v2 (agent only; baseline frozen) | **18/18** | (12/18) | `results/20260829-025117/` |
 
-All runs: model `claude-sonnet-5`, N=3 per case per system. On v2 the agent
-sweeps every dump-unsolvable case (redis-oom, worker-oom, worker-wrong-queue:
-9/9 vs the baseline's 5/9) but drops points on api-dns (1/3), where it
+All runs: model `claude-sonnet-5`, N=3 per case per system.
+
+**v0 (the frozen comparison point):** on the v2 set the
+v0 agent sweeps every dump-unsolvable case (redis-oom, worker-oom,
+worker-wrong-queue: 9/9 vs the baseline's 5/9 — e.g. [this redis-oom
+investigation](trajectories/redis-oom/20260828-210459-5813.md)) but drops
+points on api-dns
+([example miss](trajectories/api-dns/20260828-212034-91f1.md)), where it
 over-attributes to `api/code_bug` after reading source lines leaked by
-tracebacks — the sharpest signal for the next agent iteration. The baseline's
-failures cluster on exactly the cases designed to need investigation.
+tracebacks. The baseline's failures cluster on exactly the cases designed to
+need investigation.
+
 **v1 (negative result, reverted):** one additive prompt rule targeting the
 api-dns failure ("diagnose code_bug only after state checks rule out other
 faults; prefer tool-verified state over code read from tracebacks"). Measured
@@ -102,7 +113,9 @@ agent-only against the frozen set (v1 sweep interrupted by host auto-suspend
 and completed via targeted per-case runs — merge provenance in that results
 dir's meta): the target case did not move (api-dns 1/3, one run still
 answering api/code_bug), redis-oom regressed 3/3 → 2/3 with the agent
-second-guessing a correct state-based conclusion, and token spend rose. The
+second-guessing a correct state-based conclusion
+([the regression run](trajectories/redis-oom/20260828-215624-4a1f.md)), and
+token spend rose. The
 rule was reverted; the traceback-over-trust failure likely needs a
 discriminating tool (e.g. a connectivity/DNS probe from inside the api
 container) rather than prompt exhortation.
@@ -112,7 +125,8 @@ prompt exhortation, with the system prompt untouched. probe_connectivity runs
 DNS resolution and a TCP connect from inside a chosen service's container
 (allowlisted to lab services on both ends, shell-free). The agent went 18/18:
 every api-dns run performed the differential probe (api→postgres fails while
-worker→postgres succeeds) and cited it as evidence, and mean input tokens on
+worker→postgres succeeds) and cited it as evidence
+([example](trajectories/api-dns/20260829-030825-7f79.md)), and mean input tokens on
 api-dns halved vs v1 (227k → 99k) with redis-oom down 105k → 25k — proof
 beats argument on both accuracy and cost.
 
@@ -165,16 +179,21 @@ improvement. Every agent investigation is replayable from `trajectories/`.
 make setup                  # venv + host-side deps
 make up                     # start the synthetic lab (healthy state)
 make smoke                  # end-to-end canary of the healthy lab
-make break CASE=redis-oom   # inject a fault (postgres-down | redis-oom)
+make break CASE=redis-oom   # inject a fault (see cases/cases.yaml for ids)
 make run CASE=redis-oom     # agent diagnoses the broken lab (needs API key)
 make eval                   # full experiment: N=3 × cases × {baseline, agent}
+make render                 # readable markdown for every trajectory
 make reset                  # deterministic clean state (down -v && up)
 ```
+
+Step-by-step walkthrough with expected outputs, pinned versions, and
+measured per-sweep runtime and cost: **[REPRODUCING.md](REPRODUCING.md)**.
 
 ### Test
 
 ```bash
-make test      # unit suite: grading, allowlist boundary, cases schema, helpers
+make test      # unit suite: grading, both tool allowlists, cases schema,
+               # trajectory writer + renderer, helpers
 make validate  # proves a clean clone works: setup+test+up+smoke+down in a temp dir
 ```
 
@@ -194,7 +213,7 @@ agent/      tool-use loop, read-only tools, trajectory writer
 eval/       harness + grading
 tests/      unit suite (no docker, no API key needed)
 scripts/    break.py, smoke.sh, validate.sh
-trajectories/  one JSONL per agent run (committed: part of the submission)
+trajectories/  per agent run: raw JSONL + rendered .md (committed: part of the submission)
 results/    eval outputs: results.json + summary.md per run (committed)
 ```
 
@@ -209,7 +228,9 @@ separate planning/review session.
 Lab, eval set v2 (6 cases, frozen), frozen baseline, pre-registered harness,
 and three measured agent iterations: v0 (15/18), v1 (prompt rule — negative
 result, reverted), v2 (probe_connectivity tool — 18/18, kept). The agent now
-beats the 12/18 baseline on every case family. Remaining headroom is cost
-and breadth, not accuracy: probe target allowlist could admit raw in-network
-IPs (the agent asked for one to split DNS from TCP), and a larger case set
-would restore discriminating power now that v2 saturates this one.
+beats the 12/18 baseline on every case family. Trajectories ship with
+readable renderings and REPRODUCING.md documents the exact commands, costs
+and runtimes. Next: **eval set v3** — a larger case set to restore
+discriminating power now that v2 saturates this one; secondary ideas are
+admitting raw in-network IPs as probe targets (the agent asked for one to
+split DNS from TCP) and trimming token spend on already-solved cases.
