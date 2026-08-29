@@ -147,3 +147,99 @@ cases:
       component: worker
       fault_type: misconfiguration
       accepted_fault_types: [misconfiguration]
+
+  # --- eval set v3 additions: probe-blind faults (connectivity is fine) ---
+
+  - id: nginx-bad-upstream
+    description: >-
+      Probe-blind control case: nginx is redeployed with a config that
+      proxies to api:8001 instead of api:8000, so every proxied route returns
+      502 while the api itself is healthy. DNS and TCP from nginx to api:8000
+      are fine, so probe_connectivity exonerates the network; nginx's error
+      log names the refused connection to port 8001, so the dump suffices for
+      a careful reader.
+    alert: >-
+      [ALERT] HighErrorRate: 502 responses on all routes through the edge
+      exceeded 90% over the last 2 minutes (normal: 0%). Service: shop edge
+      (nginx), env: lab.
+    injection:
+      - >-
+        NGINX_CONF=./nginx/nginx-broken.conf
+        docker compose -f lab/docker-compose.yml up -d nginx
+    settle_seconds: 25
+    ground_truth:
+      component: nginx
+      fault_type: misconfiguration
+      accepted_fault_types: [misconfiguration]
+
+  - id: redis-auth
+    description: >-
+      Probe-blind case: requirepass is set on redis at runtime and existing
+      client connections are killed, so every unauthenticated client --
+      api, worker, and the agent's own redis-cli -- gets NOAUTH. TCP to
+      redis:6379 stays fine. The api silently falls back to slow synchronous
+      processing (latency on POST /jobs, same alert as redis-oom); the worker
+      logs NOAUTH tracebacks, so the dump names the cause for a careful
+      reader. Alert text is intentionally identical to redis-oom.
+    alert: >-
+      [ALERT] HighLatency: p95 latency on POST /jobs rose above 2s
+      (normal: <100ms) over the last 2 minutes. Error rate normal.
+      Service: shop API, env: lab.
+    injection:
+      - >-
+        docker compose -f lab/docker-compose.yml exec -T redis sh -c
+        'redis-cli config set requirepass lab_incident_pw >/dev/null &&
+        redis-cli -a lab_incident_pw --no-auth-warning client kill type normal
+        >/dev/null; true'
+    settle_seconds: 30
+    ground_truth:
+      component: redis
+      fault_type: misconfiguration
+      accepted_fault_types: [misconfiguration]
+
+  - id: pg-lock
+    description: >-
+      Multi-hop, probe-blind, dump-silent case: a stale admin transaction
+      holds ACCESS EXCLUSIVE on the orders table (BEGIN; LOCK TABLE;
+      pg_sleep in one session). GET /orders hangs until client timeouts and
+      the worker stalls mid-job, but NO service logs an error -- requests
+      that never complete never get log lines. All connectivity is fine.
+      The blocker is visible only via SQL: pg_stat_activity shows the
+      LOCK TABLE session and the waiting queries (wait_event_type=Lock).
+    alert: >-
+      [ALERT] HighLatency: GET /orders requests are hanging past the 15s
+      client timeout (normal: ~20ms); POST /jobs and other endpoints normal.
+      Service: shop API, env: lab.
+    injection:
+      - >-
+        docker compose -f lab/docker-compose.yml exec -dT postgres sh -c
+        'psql -U app -d shop -c
+        "BEGIN; LOCK TABLE orders IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(3600);"
+        </dev/null >/dev/null 2>&1 & wait'
+    settle_seconds: 30
+    ground_truth:
+      component: postgres
+      fault_type: other
+      accepted_fault_types: [other, resource_exhaustion]
+
+  - id: api-cpu-limit
+    description: >-
+      Multi-hop, probe-blind, dump-silent case: the api container's CPU
+      quota is dropped to 0.01 cores at runtime. Every endpoint degrades to
+      multi-second responses, but no service logs an error -- the api's own
+      access log just shows large durations. Connectivity is fine. The cause
+      (NanoCpus in HostConfig) is visible only via docker inspect api /
+      docker stats.
+    alert: >-
+      [ALERT] HighLatency: latency degraded more than 10x on ALL api
+      endpoints (multi-second responses, normal <100ms). Error rate normal.
+      Service: shop API, env: lab.
+    injection:
+      - >-
+        docker update --cpus 0.01
+        $(docker compose -f lab/docker-compose.yml ps -q api)
+    settle_seconds: 30
+    ground_truth:
+      component: api
+      fault_type: resource_exhaustion
+      accepted_fault_types: [resource_exhaustion, misconfiguration]

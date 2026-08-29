@@ -58,7 +58,7 @@ services:
   nginx:
     image: nginx:1.27-alpine
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ${NGINX_CONF:-./nginx/nginx.conf}:/etc/nginx/nginx.conf:ro
     ports:
       - "${LAB_HTTP_PORT:-18080}:80"
     depends_on:

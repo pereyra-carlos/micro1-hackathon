@@ -108,7 +108,8 @@ def validate_exec(command: str) -> dict:
         # meta-command (e.g. \! runs a shell).
         if ";" in command or "\\" in command:
             raise ValueError("psql: ';' and backslash meta-commands are not allowed")
-        return _validate_psql(shlex.split(command)[1:])
+        parts = command.split(None, 1)
+        return _validate_psql(parts[1] if len(parts) > 1 else "")
     if head == "docker":
         return _validate_docker(tokens[1:])
     raise ValueError(
@@ -132,14 +133,17 @@ def _validate_redis(args) -> dict:
     raise ValueError(f"redis-cli command {sub!r} is not in the read-only allowlist")
 
 
-def _validate_psql(args) -> dict:
-    if args and args[0] == "-c":
-        args = args[1:]
-    # Only the first token could act as a psql flag; later '-' tokens are SQL
-    # arithmetic, and the whole tail is passed as a single -c string anyway.
-    if args and args[0].startswith("-"):
+def _validate_psql(rest: str) -> dict:
+    # The SQL is kept raw (not shlex-rejoined) so string literals like
+    # 'idle' keep their quotes; it is passed as a single argv element to
+    # psql -c, so quoting has no shell meaning here.
+    sql = rest.strip()
+    if sql.startswith("-c"):
+        sql = sql[2:].strip()
+    if sql.startswith("-"):
         raise ValueError("psql flags are not allowed; pass 'psql SELECT ...'")
-    sql = " ".join(args).strip()
+    if len(sql) >= 2 and sql[0] == sql[-1] and sql[0] in "\"'":
+        sql = sql[1:-1].strip()  # unwrap one level of -c style outer quoting
     if not sql.lower().startswith("select"):
         raise ValueError("psql: only a single SELECT statement is allowed")
     return {"kind": "psql", "sql": sql}
@@ -187,7 +191,8 @@ def exec_readonly(command: str) -> tuple[str, bool]:
     """Returns (output, is_error)."""
     try:
         plan = validate_exec(command)
-        return truncate(_execute_plan(plan)), False
+        # docker inspect payloads run ~9-10k chars; a 12k cap keeps them whole.
+        return truncate(_execute_plan(plan), limit=12000), False
     except Exception as exc:
         return f"error: {exc}", True
 

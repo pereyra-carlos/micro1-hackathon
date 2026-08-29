@@ -72,6 +72,15 @@ the git history is the pre-registration evidence.
   | redis-oom | redis / resource_exhaustion | no — no service log contains the cause |
   | worker-oom | worker / resource_exhaustion | no — SIGKILL leaves no log; cause only in docker inspect |
   | worker-wrong-queue | worker / misconfiguration | no — worker Up and silent; drift only in inspect Env / redis keys |
+  | nginx-bad-upstream *(v3)* | nginx / misconfiguration | yes — nginx error log names the refused upstream; probe exonerates the network |
+  | redis-auth *(v3)* | redis / misconfiguration | yes — worker logs AuthenticationError; TCP fine, alert identical to redis-oom |
+  | pg-lock *(v3)* | postgres / other | no — no log anywhere; blocker visible only in pg_stat_activity |
+  | api-cpu-limit *(v3)* | api / resource_exhaustion | no — no errors, only slow; cause only in docker inspect / stats |
+
+  **Eval set v3 (frozen 2026-08-29)** adds the last four: all are
+  *probe-blind* (DNS/TCP healthy), chosen to blunt the v2 agent's strongest
+  tool, and 5 of 10 total are unsolvable from the dump. Baseline numbers on
+  v3 cases are new measurements of the frozen baseline prompt.
 - **Metric:** a diagnosis is **correct** iff `root_cause_component` matches
   ground truth exactly AND `root_cause_type` is in the case's declared
   `accepted_fault_types`. Component-only accuracy is also recorded.

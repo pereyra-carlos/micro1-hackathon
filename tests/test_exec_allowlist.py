@@ -50,6 +50,16 @@ def test_rejected_commands(command):
         validate_exec(command)
 
 
+def test_psql_preserves_string_literal_quotes():
+    plan = validate_exec("psql SELECT count(*) FROM pg_stat_activity WHERE state != 'idle'")
+    assert "'idle'" in plan["sql"]
+
+
+def test_psql_unwraps_outer_dash_c_quoting():
+    plan = validate_exec("psql -c \"SELECT 1 WHERE x = 'a'\"")
+    assert plan["sql"] == "SELECT 1 WHERE x = 'a'"
+
+
 def test_select_into_is_rejected_by_readonly_role_note():
     # SELECT ... INTO would create a table; the psql role 'readonly' has no
     # write grants, so even this residual SELECT form cannot mutate state.
