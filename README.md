@@ -86,6 +86,7 @@ the git history is the pre-registration evidence.
 | --- | --- | --- | --- | --- | --- |
 | v0 | Initial agent, pre-registered eval | v1 (2 cases) | **6/6** | 4/6 | `results/20260828-172003/` |
 | v0 + psql-tool fix | Eval set v2: 6 cases (4 new), frozen | v2 (6 cases) | **15/18** | 12/18 | `results/20260828-205644/` |
+| v1 — **reverted** | Prompt rule: prefer verified state over traceback-inferred code | v2 (agent only; baseline frozen) | 14/18 | (12/18) | `results/20260829-v1-agent/` |
 
 All runs: model `claude-sonnet-5`, N=3 per case per system. On v2 the agent
 sweeps every dump-unsolvable case (redis-oom, worker-oom, worker-wrong-queue:
@@ -93,6 +94,18 @@ sweeps every dump-unsolvable case (redis-oom, worker-oom, worker-wrong-queue:
 over-attributes to `api/code_bug` after reading source lines leaked by
 tracebacks — the sharpest signal for the next agent iteration. The baseline's
 failures cluster on exactly the cases designed to need investigation.
+**v1 (negative result, reverted):** one additive prompt rule targeting the
+api-dns failure ("diagnose code_bug only after state checks rule out other
+faults; prefer tool-verified state over code read from tracebacks"). Measured
+agent-only against the frozen set (v1 sweep interrupted by host auto-suspend
+and completed via targeted per-case runs — merge provenance in that results
+dir's meta): the target case did not move (api-dns 1/3, one run still
+answering api/code_bug), redis-oom regressed 3/3 → 2/3 with the agent
+second-guessing a correct state-based conclusion, and token spend rose. The
+rule was reverted; the traceback-over-trust failure likely needs a
+discriminating tool (e.g. a connectivity/DNS probe from inside the api
+container) rather than prompt exhortation.
+
 `results/20260828-200028/` is an intermediate sweep kept for the record: it
 exposed that the original pg-connections design made the ground truth
 undiscoverable (agent 0/3), which forced the case redesign (break-glass
@@ -184,7 +197,8 @@ separate planning/review session.
 ## Status
 
 Day 1 complete: lab, eval set v2 (6 cases, frozen), frozen baseline, agent
-v0, pre-registered harness, and the v2 baseline numbers (agent 15/18 vs
-baseline 12/18). Next: iterate on the agent only, one changelog row per
-change — first target is the api-dns failure mode (trusting leaked
-traceback source over direct state checks).
+v0, pre-registered harness, v2 baseline numbers (agent 15/18 vs baseline
+12/18), and one measured agent iteration (v1, negative result, reverted —
+see changelog). Next iteration ideas, in order: a connectivity/DNS probe
+tool to attack the api-dns failure mode with evidence instead of prompt
+rules; tightening the agent's token spend on cases it already solves.

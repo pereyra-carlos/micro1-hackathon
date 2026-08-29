@@ -1,0 +1,170 @@
+{
+  "meta": {
+    "model": "claude-sonnet-5",
+    "repetitions": 3,
+    "cases": [
+      "worker-wrong-queue"
+    ],
+    "systems": [
+      "agent"
+    ],
+    "started": "2026-08-29T02:41:00+00:00"
+  },
+  "rows": [
+    {
+      "system": "agent",
+      "case": "worker-wrong-queue",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-024210-8c8d",
+      "answer": {
+        "root_cause_component": "worker",
+        "root_cause_type": "misconfiguration",
+        "explanation": "The api enqueues jobs on the redis list 'jobs' (its default queue key, since no QUEUE_KEY env var is set for the api container), while the worker container was deployed with QUEUE_KEY=jobs-reporting, so it BLPOPs from a completely different, permanently-empty list. As a result the worker sits idle (only logged 'worker started', no processing activity) while the 'jobs' list backlog grows unbounded and no reports are ever written, exactly matching the alert. This is a pure queue-name mismatch between the two services, not a crash, resource, or network problem \u2014 both containers are up and healthy per docker compose ps and /health.",
+        "evidence": [
+          {
+            "source": "exec_readonly redis-cli llen jobs",
+            "quote": "15"
+          },
+          {
+            "source": "exec_readonly redis-cli llen jobs-reporting",
+            "quote": "0"
+          },
+          {
+            "source": "docker inspect worker",
+            "quote": "\"QUEUE_KEY=jobs-reporting\","
+          },
+          {
+            "source": "docker inspect api",
+            "quote": "\"REDIS_URL=redis://redis:6379/0\",\n                \"DATABASE_URL=postgresql://svc:svc_password@postgres:5432/shop\","
+          },
+          {
+            "source": "get_logs worker",
+            "quote": "worker-1  | 2026-08-29 02:41:30,860 INFO worker started"
+          },
+          {
+            "source": "get_status",
+            "quote": "GET /health -> 200 {\"db\":\"ok\",\"queue\":\"ok\"}"
+          }
+        ],
+        "suggested_fix": "Align the queue key configuration between api and worker: either remove the QUEUE_KEY=jobs-reporting override from the worker service in docker-compose.yml (so it falls back to the same default 'jobs' the api uses), or explicitly set QUEUE_KEY=jobs on both services. After the fix, verify redis-cli llen jobs drains and worker logs show job processing again."
+      },
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "input_tokens": 22891,
+        "output_tokens": 1709
+      },
+      "n_tool_calls": 7,
+      "wall_seconds": 20.7,
+      "trajectory": "trajectories/worker-wrong-queue/20260829-024210-8c8d.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 0
+    },
+    {
+      "system": "agent",
+      "case": "worker-wrong-queue",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-024352-e865",
+      "answer": {
+        "root_cause_component": "worker",
+        "root_cause_type": "misconfiguration",
+        "explanation": "The worker container was started with an environment override QUEUE_KEY=jobs-reporting, while the api service (which has no QUEUE_KEY override, so it uses the default queue name \"jobs\") enqueues incoming job requests onto the redis list \"jobs\". The worker is therefore blocking/polling on the wrong list (\"jobs-reporting\", confirmed empty via LLEN) and never sees any of the jobs the api pushes into \"jobs\" (confirmed growing to 15 and rising). Since the worker's blocking read/poll on an empty list is not an error condition, it logs nothing beyond startup, which is why no failures appear in worker logs even though no reports are written. This is a pure configuration mismatch between the two services' queue key, not a crash, network, or resource problem \u2014 both redis and postgres are healthy and reachable (api /health returns db:ok, queue:ok).",
+        "evidence": [
+          {
+            "source": "exec_readonly redis-cli llen jobs",
+            "quote": "15"
+          },
+          {
+            "source": "exec_readonly redis-cli llen jobs-reporting",
+            "quote": "0"
+          },
+          {
+            "source": "exec_readonly docker inspect worker",
+            "quote": "\"REDIS_URL=redis://redis:6379/0\",\n                \"QUEUE_KEY=jobs-reporting\","
+          },
+          {
+            "source": "exec_readonly docker inspect api",
+            "quote": "\"REDIS_URL=redis://redis:6379/0\",\n                \"DATABASE_URL=postgresql://svc:svc_password@postgres:5432/shop\","
+          },
+          {
+            "source": "get_logs worker",
+            "quote": "worker-1  | 2026-08-29 02:43:13,128 INFO worker started"
+          },
+          {
+            "source": "get_status",
+            "quote": "GET /health -> 200 {\"db\":\"ok\",\"queue\":\"ok\"}"
+          }
+        ],
+        "suggested_fix": "Align the queue key configuration between the api and worker services \u2014 either remove the QUEUE_KEY=jobs-reporting override from the worker's environment (docker-compose.yml / .env) so it defaults to \"jobs\" like the api, or explicitly set the same QUEUE_KEY on both services. After fixing, restart the worker and verify LLEN jobs drains and reports count increases."
+      },
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "input_tokens": 32252,
+        "output_tokens": 1828
+      },
+      "n_tool_calls": 9,
+      "wall_seconds": 23.5,
+      "trajectory": "trajectories/worker-wrong-queue/20260829-024352-e865.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 1
+    },
+    {
+      "system": "agent",
+      "case": "worker-wrong-queue",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-024538-6bf0",
+      "answer": {
+        "root_cause_component": "worker",
+        "root_cause_type": "misconfiguration",
+        "explanation": "The api enqueues jobs with RPUSH onto the default Redis list key (\"jobs\", confirmed by the alert and by the api's redis client in `client list` showing cmd=rpush), while the worker container was started with an overridden QUEUE_KEY=jobs-reporting environment variable and is doing BLPOP against that different key. As a result the worker is idle/blocked waiting on an empty list that nothing ever pushes to, while jobs pile up unconsumed on the \"jobs\" list the api actually writes to. This produces exactly the observed symptom: steady queue growth on 'jobs' with zero report writes, despite the worker process being up, healthy, and connected to Redis with no errors in its logs.",
+        "evidence": [
+          {
+            "source": "exec_readonly redis-cli llen jobs",
+            "quote": "16"
+          },
+          {
+            "source": "docker inspect worker",
+            "quote": "\"REDIS_URL=redis://redis:6379/0\",\n                \"QUEUE_KEY=jobs-reporting\","
+          },
+          {
+            "source": "docker inspect api",
+            "quote": "\"DATABASE_URL=postgresql://svc:svc_password@postgres:5432/shop\",\n                \"REDIS_URL=redis://redis:6379/0\","
+          },
+          {
+            "source": "exec_readonly redis-cli client list",
+            "quote": "id=6 addr=172.21.0.5:35746 laddr=172.21.0.3:6379 ... cmd=rpush user=default ...\nid=9 addr=172.21.0.4:47572 laddr=172.21.0.3:6379 ... flags=b ... cmd=blpop user=default"
+          },
+          {
+            "source": "get_logs worker",
+            "quote": "worker-1  | 2026-08-29 02:44:58,390 INFO worker started"
+          }
+        ],
+        "suggested_fix": "Remove the QUEUE_KEY=jobs-reporting override from the worker service definition (or align it with the api's queue key, e.g. set QUEUE_KEY=jobs consistently for both services via a shared env var), then restart the worker so it consumes from the same Redis list the api publishes to. Also add a startup assertion/metric comparing configured queue key between api and worker to catch this class of drift earlier."
+      },
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "input_tokens": 41594,
+        "output_tokens": 2389
+      },
+      "n_tool_calls": 11,
+      "wall_seconds": 32.3,
+      "trajectory": "trajectories/worker-wrong-queue/20260829-024538-6bf0.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 2
+    }
+  ]
+}

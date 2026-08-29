@@ -1,0 +1,153 @@
+{
+  "meta": {
+    "model": "claude-sonnet-5",
+    "repetitions": 3,
+    "cases": [
+      "api-dns"
+    ],
+    "systems": [
+      "agent"
+    ],
+    "started": "2026-08-29T02:22:05+00:00"
+  },
+  "rows": [
+    {
+      "system": "agent",
+      "case": "api-dns",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-022249-e830",
+      "answer": {
+        "root_cause_component": "api",
+        "root_cause_type": "code_bug",
+        "explanation": "GET /orders calls db_conn(), which does a bare `psycopg.connect(DATABASE_URL, connect_timeout=2)` on every single request instead of reusing a pooled/persistent connection. Each call therefore performs a fresh DNS lookup of the \"postgres\" hostname through Docker's embedded resolver. In this environment that lookup is intermittently failing/timing out (EAI_AGAIN \"Temporary failure in name resolution\"), and because glibc's resolver retries per nameserver with a ~5s timeout, failed lookups block the request thread for exactly 5s or 10s - matching the nginx/loadgen access-log timings (rt=5.01x / rt=10.01x) - after which the handler raises OperationalError and returns 500. In contrast, the API's Redis client and the worker's Postgres usage establish a connection once and keep it alive (redis-cli client list shows the api's redis connection at age=238s, idle=2s, never reconnecting), so they never re-trigger DNS resolution and never see the fault - explaining why POST /jobs and worker job processing succeed continuously while GET /orders fails ~80% of the time. The repeated blocking DB calls also exhaust the app's request-handling threadpool, which is why the container's own /health check (served by the same event loop/threadpool) started timing out and uvicorn was marked unhealthy, even though Postgres itself (pg_stat_activity count=7, healthy container, accepting connections per its own healthcheck) and Redis are both fine.",
+        "evidence": [
+          {
+            "source": "get_logs api",
+            "quote": "psycopg.OperationalError: [Errno -3] Temporary failure in name resolution"
+          },
+          {
+            "source": "get_logs api",
+            "quote": "File \"/srv/api.py\", line 28, in db_conn\n    return psycopg.connect(DATABASE_URL, connect_timeout=2)"
+          },
+          {
+            "source": "get_logs nginx",
+            "quote": "172.21.0.7 \"GET /orders HTTP/1.1\" 500 rt=10.012 urt=10.011"
+          },
+          {
+            "source": "get_logs nginx",
+            "quote": "172.21.0.7 \"POST /jobs HTTP/1.1\" 202 rt=0.003 urt=0.003"
+          },
+          {
+            "source": "get_logs worker",
+            "quote": "worker-1  | 2026-08-29 02:23:44,373 INFO processed job ae725dd3478e in 2.0s"
+          },
+          {
+            "source": "exec_readonly redis-cli client list",
+            "quote": "id=6 addr=172.21.0.5:46288 laddr=172.21.0.3:6379 fd=11 name= age=238 idle=2 flags=N db=0 ... cmd=ping user=default redir=-1 resp=2 lib-name=redis-py lib-ver=5.2.1"
+          },
+          {
+            "source": "get_status",
+            "quote": "incident-lab-api-1        incident-lab-api         \"uvicorn api:app --h\u2026\"   api        40 seconds ago   Up 34 seconds (unhealthy)"
+          },
+          {
+            "source": "exec_readonly psql",
+            "quote": " count \n-------\n     7\n(1 row)"
+          }
+        ],
+        "suggested_fix": "Add a persistent connection pool (e.g. psycopg_pool / SQLAlchemy pool) for Postgres in the api service instead of calling psycopg.connect() on every request, so DNS resolution and TCP handshake happen once (or a bounded number of times) rather than per-request. Separately, investigate/harden the docker-compose network's embedded DNS (127.0.0.11) reliability for the 'postgres' name (e.g. check for network churn, restart the container network, or add a short-TTL local resolver/cache) since it is the proximate trigger; also add a strict overall request timeout and circuit-breaker around DB calls so a DNS/connect stall can't exhaust the app's request threadpool and take down the /health check with it."
+      },
+      "usage": {
+        "input_tokens": 296773,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 17168
+      },
+      "n_tool_calls": 18,
+      "wall_seconds": 236.4,
+      "trajectory": "trajectories/api-dns/20260829-022249-e830.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": false,
+        "correct": false
+      },
+      "repetition": 0
+    },
+    {
+      "system": "agent",
+      "case": "api-dns",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-022740-9cf4",
+      "answer": {
+        "root_cause_component": "api",
+        "root_cause_type": "network",
+        "explanation": "GET /orders (and /health) call db_conn(), which opens a brand-new psycopg connection to host \"postgres\" on every request. That connect() call is failing consistently with a DNS resolution error (EAI_AGAIN / \"Temporary failure in name resolution\") from inside the api container, causing the request to hang until the retry/backoff completes and then return 500 - exactly matching the escalating 5s/10s response times seen at nginx. Postgres itself is proven healthy and reachable: it is 'healthy' in docker status, pg_stat_activity shows a normal, low connection count (7), and the worker container - on the very same docker network, resolving the very same hostname \"postgres\" - keeps connecting and successfully processing jobs the whole time. POST /jobs (which only touches redis, using a connection that doesn't need a fresh per-request DNS lookup) also keeps returning 202 throughout the incident. This isolates the fault to the api container's ability to resolve the \"postgres\" DNS name specifically (its embedded docker DNS resolution path), not to Postgres availability, redis, or the shared docker network as a whole, since other containers on the same network resolve the same name without issue.",
+        "evidence": [
+          {
+            "source": "get_logs api",
+            "quote": "File \"/srv/api.py\", line 28, in db_conn\napi-1  |     return psycopg.connect(DATABASE_URL, connect_timeout=2)\napi-1  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\napi-1  | psycopg.OperationalError: [Errno -3] Temporary failure in name resolution"
+          },
+          {
+            "source": "get_logs nginx",
+            "quote": "172.21.0.7 \"GET /orders HTTP/1.1\" 500 rt=10.012 urt=10.011"
+          },
+          {
+            "source": "get_logs worker",
+            "quote": "worker-1  | 2026-08-29 02:28:11,933 INFO processed job c25b8db71766 in 2.0s"
+          },
+          {
+            "source": "exec_readonly psql",
+            "quote": " count \n-------\n     7\n(1 row)"
+          },
+          {
+            "source": "get_status",
+            "quote": "GET /health failed: timed out"
+          }
+        ],
+        "suggested_fix": "Recreate/restart the api container to reset its network namespace and DNS resolver state (docker compose restart api), and check the api service definition for any custom dns/dns_search/extra_hosts override that could differ from the other services. Longer-term, add DNS/connect retry with backoff and switch to a pooled DB connection (e.g. psycopg_pool) so a single container-local DNS hiccup doesn't fail every request, and add an explicit alert on api container health-check failures so this failure mode is caught immediately."
+      },
+      "usage": {
+        "input_tokens": 176099,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 13403
+      },
+      "n_tool_calls": 16,
+      "wall_seconds": 184.0,
+      "trajectory": "trajectories/api-dns/20260829-022740-9cf4.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 1
+    },
+    {
+      "system": "agent",
+      "case": "api-dns",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-023147-147b",
+      "answer": {
+        "root_cause_component": "api",
+        "root_cause_type": "resource_exhaustion",
+        "explanation": "GET /orders and GET /health in the api service fail because psycopg.connect() cannot even resolve the \"postgres\" hostname (EAI_AGAIN / \"Temporary failure in name resolution\"), i.e. the failure happens before a TCP connection to Postgres is attempted. Postgres itself is healthy and fully reachable throughout the incident window: the worker container, using the identical DATABASE_URL/hostname on the same docker network, keeps successfully connecting and processing jobs the whole time, and pg_stat_activity shows no connection-limit or backlog problems. The asymmetry (api fails, worker succeeds, same network/DNS server) rules out a broken postgres, redis, or network/DNS-server-wide fault. The api's /orders handler opens a brand-new, unpooled psycopg connection (and therefore a fresh DNS lookup) on every single request, and this is compounded by the docker healthcheck hitting /health every 5s and also trying to connect to the DB with multi-second timeouts. Under the loadgen's steady traffic this per-request connect/DNS-lookup churn exhausts a client-side resource in the api container (socket/file-descriptor budget) after the very first request succeeds, so every subsequent getaddrinfo() call for \"postgres\" fails, producing 5-10s hangs and 5xx/503s that match the alert while CPU/memory/PID counts on the container remain nominal (ruling out CPU/mem exhaustion or a cgroup limit).</explanation>\n<parameter name=\"evidence\">[{\"source\":\"get_logs api\",\"quote\":\"psycopg.OperationalError: [Errno -3] Temporary failure in name resolution\"},{\"source\":\"get_logs api\",\"quote\":\"File \\\"/srv/api.py\\\", line 28, in db_conn\\n    return psycopg.connect(DATABASE_URL, connect_timeout=2)\"},{\"source\":\"get_logs nginx\",\"quote\":\"172.21.0.7 \\\"GET /orders HTTP/1.1\\\" 200 rt=0.024 urt=0.023\\nnginx-1  | 172.21.0.7 \\\"POST /jobs HTTP/1.1\\\" 202 rt=0.004 urt=0.004\\n... 172.21.0.7 \\\"GET /orders HTTP/1.1\\\" 500 rt=10.012 urt=10.011\"},{\"source\":\"get_logs worker\",\"quote\":\"worker-1  | 2026-08-29 02:32:26,416 INFO processed job 03fcdda00687 in 2.0s\\nworker-1  | 2026-08-29 02:32:39,448 INFO processed job 1b394734978d in 2.0s\"},{\"source\":\"exec_readonly docker stats\",\"quote\":\"a93dc57a81a0   incident-lab-api-1        0.25%     41.37MiB / 62.47GiB   0.06%     22.8kB / 16.3kB   184kB / 852kB     3\"},{\"source\":\"exec_readonly psql\",\"quote\":\" client_addr | usename  | state  | count \\n-------------+----------+--------+-------\\n             |          |        |     4\\n             | app      |        |     1\\n             | readonly | active |     1\"}]",
+        "evidence": [],
+        "suggested_fix": "Introduce a proper connection pool (e.g. psycopg_pool.ConnectionPool) in the api so DB connections/DNS lookups aren't re-established on every request; raise/verify the container's nofile ulimit; add caching/backoff so /health doesn't repeatedly hammer a failing DB path every 5s; and add circuit-breaking/retry-with-jitter around db_conn() so a slow dependency degrades gracefully instead of exhausting client-side sockets."
+      },
+      "usage": {
+        "input_tokens": 207822,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 19470
+      },
+      "n_tool_calls": 17,
+      "wall_seconds": 258.1,
+      "trajectory": "trajectories/api-dns/20260829-023147-147b.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": false,
+        "correct": false
+      },
+      "repetition": 2
+    }
+  ]
+}

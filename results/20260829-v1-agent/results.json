@@ -1,0 +1,953 @@
+{
+  "meta": {
+    "model": "claude-sonnet-5",
+    "repetitions": 3,
+    "systems": [
+      "agent"
+    ],
+    "agent_version": "v1 (commit b42bdd0)",
+    "note": "Merged from five runs on identical HEAD: the original sweep was killed by host auto-suspend after 8 rows; targeted --case runs completed the remaining 10 repetitions.",
+    "source_runs": [
+      "results/20260828-214820",
+      "results/20260829-022001",
+      "results/20260829-022205",
+      "results/20260829-023625",
+      "results/20260829-024100"
+    ]
+  },
+  "rows": [
+    {
+      "system": "agent",
+      "case": "postgres-down",
+      "model": "claude-sonnet-5",
+      "run_id": "20260828-214904-7e53",
+      "answer": {
+        "root_cause_component": "postgres",
+        "root_cause_type": "process_down",
+        "explanation": "The postgres container was killed (ExitCode 137/SIGKILL) shortly after startup, with no shutdown log lines (no \"received signal\", no checkpoint) following the \"database system is ready to accept connections\" message, indicating an abrupt external kill rather than a graceful stop. Because the postgres service in docker-compose has RestartPolicy \"no\", the container stayed in the Exited state instead of being restarted automatically, leaving the database permanently unreachable for the remainder of the incident window. The API's /orders handler calls db_conn() -> psycopg.connect() on every request; with postgres down, DNS/connect resolution to the postgres hostname fails to complete for a running instance, throwing psycopg.OperationalError and causing the FastAPI exception handler to return 5xx. /health likewise reports {\"db\":\"unreachable\",\"queue\":\"ok\"}, confirming the queue/redis and worker path is unaffected and the fault is isolated to postgres's absence, not the API code or Redis.",
+        "evidence": [
+          {
+            "source": "get_status",
+            "quote": "incident-lab-postgres-1   postgres:16-alpine       \"docker-entrypoint.s\u2026\"   postgres   41 seconds ago   Exited (137) 28 seconds ago"
+          },
+          {
+            "source": "get_status",
+            "quote": "GET /health -> 503 {\"db\":\"unreachable\",\"queue\":\"ok\"}"
+          },
+          {
+            "source": "get_logs(api)",
+            "quote": "psycopg.OperationalError: [Errno -3] Temporary failure in name resolution"
+          },
+          {
+            "source": "exec_readonly(docker inspect postgres)",
+            "quote": "\"ExitCode\": 137, ... \"OOMKilled\": false"
+          },
+          {
+            "source": "exec_readonly(docker inspect postgres)",
+            "quote": "\"RestartPolicy\": {\n                \"Name\": \"no\",\n                \"MaximumRetryCount\": 0\n            }"
+          },
+          {
+            "source": "get_logs(postgres)",
+            "quote": "2026-08-28 21:48:30.363 UTC [1] LOG:  database system is ready to accept connections"
+          },
+          {
+            "source": "get_status (second check)",
+            "quote": "incident-lab-postgres-1   postgres:16-alpine       \"docker-entrypoint.s\u2026\"   postgres   About a minute ago   Exited (137) 50 seconds ago"
+          }
+        ],
+        "suggested_fix": "Restart the postgres container (docker compose up -d postgres) and add a restart policy (e.g. restart: unless-stopped or on-failure) so it recovers automatically from future kills; also investigate what sent SIGKILL to the postgres process (check host dmesg/OOM logs and any external supervisor/health-check killer) to prevent recurrence, and consider adding a depends_on with health-based condition plus connection retry/backoff in the API's db_conn() so transient DB outages degrade gracefully instead of raising unhandled exceptions."
+      },
+      "usage": {
+        "input_tokens": 52263,
+        "output_tokens": 2539,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0
+      },
+      "n_tool_calls": 7,
+      "wall_seconds": 37.6,
+      "trajectory": "trajectories/postgres-down/20260828-214904-7e53.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 0
+    },
+    {
+      "system": "agent",
+      "case": "postgres-down",
+      "model": "claude-sonnet-5",
+      "run_id": "20260828-215038-c41b",
+      "answer": {
+        "root_cause_component": "postgres",
+        "root_cause_type": "process_down",
+        "explanation": "The postgres container was killed (ExitCode 137/SIGKILL) shortly after completing startup and initdb, and its restart policy is \"no\", so docker-compose never brought it back up - it stayed in the \"Exited\" state. With postgres down, every API request to GET /orders that needs a DB connection (db_conn() -> psycopg.connect) fails; the failure surfaces as a DNS/connection error because the postgres hostname/socket is no longer reachable once the container is gone, which the API turns into a 5xx response. The /health endpoint confirms this chain directly: db is reported unreachable while the queue (redis) is fine, and worker/redis/nginx all remain healthy, showing the fault is isolated to the postgres dependency rather than the API, nginx, or redis/worker path.",
+        "evidence": [
+          {
+            "source": "get_status",
+            "quote": "incident-lab-postgres-1   postgres:16-alpine       \"docker-entrypoint.s\u2026\"   postgres   41 seconds ago   Exited (137) 28 seconds ago"
+          },
+          {
+            "source": "get_status",
+            "quote": "GET /health -> 503 {\"db\":\"unreachable\",\"queue\":\"ok\"}"
+          },
+          {
+            "source": "get_logs(api)",
+            "quote": "psycopg.OperationalError: [Errno -3] Temporary failure in name resolution"
+          },
+          {
+            "source": "exec_readonly(docker inspect postgres)",
+            "quote": "\"ExitCode\": 137, ... \"RestartPolicy\": { \"Name\": \"no\", \"MaximumRetryCount\": 0 }"
+          },
+          {
+            "source": "get_logs(postgres)",
+            "quote": "2026-08-28 21:50:03.749 UTC [1] LOG:  database system is ready to accept connections"
+          }
+        ],
+        "suggested_fix": "Restart the postgres container (docker compose up -d postgres) and consider setting a restart policy (e.g. 'unless-stopped' or 'on-failure') so transient kills don't leave the DB down. Investigate what sent the SIGKILL (exit 137 with no graceful shutdown log lines suggests an external kill/OOM at the host or orchestrator level, not a normal 'docker stop') and check host memory/cgroup limits or any automation that may have killed the container. Add alerting on container state/health, not just HTTP error rate, so DB outages are caught immediately."
+      },
+      "usage": {
+        "input_tokens": 35826,
+        "output_tokens": 3029,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0
+      },
+      "n_tool_calls": 6,
+      "wall_seconds": 43.5,
+      "trajectory": "trajectories/postgres-down/20260828-215038-c41b.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 1
+    },
+    {
+      "system": "agent",
+      "case": "postgres-down",
+      "model": "claude-sonnet-5",
+      "run_id": "20260828-215217-f9fe",
+      "answer": {
+        "root_cause_component": "postgres",
+        "root_cause_type": "process_down",
+        "explanation": "The postgres container exited (ExitCode 137) and, because its compose restart policy is \"no\", it never restarted and stayed down. With the postgres container gone, Docker's embedded DNS no longer has a resolvable entry for the \"postgres\" service name, so every attempt by the API (and worker) to open a new DB connection fails immediately with a name-resolution error rather than a connection-refused error. Since the GET /orders handler opens a DB connection per request with no fallback, every request raises an unhandled OperationalError which FastAPI converts to a 500, pushing the 5xx rate over the alert threshold. The worker is failing identically and retrying every 5s, and /health reports db:\"unreachable\", confirming Postgres is the common failing dependency, not a code defect in the API path itself.",
+        "evidence": [
+          {
+            "source": "get_status",
+            "quote": "incident-lab-postgres-1   postgres:16-alpine       \"docker-entrypoint.s\u2026\"   postgres   41 seconds ago   Exited (137) 28 seconds ago"
+          },
+          {
+            "source": "get_status",
+            "quote": "GET /health -> 503 {\"db\":\"unreachable\",\"queue\":\"ok\"}"
+          },
+          {
+            "source": "get_logs api",
+            "quote": "psycopg.OperationalError: [Errno -3] Temporary failure in name resolution"
+          },
+          {
+            "source": "get_logs worker",
+            "quote": "psycopg.OperationalError: [Errno -3] Temporary failure in name resolution\nworker-1  | 2026-08-28 21:52:27,958 ERROR job processing failed, retrying in 5s"
+          },
+          {
+            "source": "exec_readonly docker inspect postgres",
+            "quote": "\"ExitCode\": 137,\n            \"Error\": \"\",\n            ... \"OOMKilled\": false"
+          },
+          {
+            "source": "exec_readonly docker inspect postgres",
+            "quote": "\"RestartPolicy\": {\n                \"Name\": \"no\",\n                \"MaximumRetryCount\": 0\n            }"
+          }
+        ],
+        "suggested_fix": "Restart the postgres container/service and add a restart policy (e.g. restart: unless-stopped or on-failure) so it self-heals after a crash. Investigate host/docker logs or the signal source that sent SIGKILL (137) to postgres to prevent recurrence (e.g. check for an external process, orchestrator health-check action, or manual `docker kill`/`compose down` on that service). Also consider adding connection retry/backoff with a circuit breaker in api.py and worker.py so a transient DB outage degrades gracefully (e.g. 503 with retry-after) instead of raising unhandled exceptions on every request."
+      },
+      "usage": {
+        "input_tokens": 37060,
+        "output_tokens": 4019,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0
+      },
+      "n_tool_calls": 6,
+      "wall_seconds": 52.9,
+      "trajectory": "trajectories/postgres-down/20260828-215217-f9fe.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 2
+    },
+    {
+      "system": "agent",
+      "case": "redis-oom",
+      "model": "claude-sonnet-5",
+      "run_id": "20260828-215411-09cc",
+      "answer": {
+        "root_cause_component": "redis",
+        "root_cause_type": "misconfiguration",
+        "explanation": "Redis is configured with maxmemory=8MB and policy=noeviction, but its baseline dataset already uses ~12MB (used_memory 12246752 > maxmemory 8388608, current_eviction_exceeded_time still counting up). With noeviction, any write command that would grow memory further is rejected with an OOM error instead of evicting keys, and total_error_replies is already 16 despite very light traffic. As a result, most of the api's RPUSH calls to enqueue a job on the 'jobs' list fail; the api catches this failure and falls back to processing the job synchronously in-request (matching the worker's own ~2.0s per-job processing time seen in 'processed job ec4a073d2868 in 2.0s'), which is why POST /jobs latency jumped to a very consistent ~2.0-2.03s while returning 200 instead of the fast 202 seen for the one job that *did* make it onto the queue. Because the api swallows the Redis error and completes the work itself, the error rate stays normal even though the queueing path is broken \u2014 the symptom only shows up as latency. The queue length staying at 0 and the worker having processed only a single job total (despite dozens of successful POST /jobs) confirms the async path is essentially bypassed.",
+        "evidence": [
+          {
+            "source": "exec_readonly redis-cli info memory",
+            "quote": "used_memory:12246752\nused_memory_peak_perc:97.11%\n...\nmaxmemory:8388608\nmaxmemory_policy:noeviction"
+          },
+          {
+            "source": "exec_readonly redis-cli info stats",
+            "quote": "total_error_replies:16\n...\ntotal_eviction_exceeded_time:80467\ncurrent_eviction_exceeded_time:80467"
+          },
+          {
+            "source": "get_logs worker",
+            "quote": "worker-1  | 2026-08-28 21:53:36,416 INFO worker started\nworker-1  | 2026-08-28 21:53:42,535 INFO processed job ec4a073d2868 in 2.0s"
+          },
+          {
+            "source": "get_logs api",
+            "quote": "POST /jobs -> 202 2ms\n...\nPOST /jobs -> 200 2025ms\n...\nPOST /jobs -> 200 2031ms"
+          },
+          {
+            "source": "exec_readonly redis-cli llen jobs",
+            "quote": "0"
+          }
+        ],
+        "suggested_fix": "Raise Redis maxmemory to a value that comfortably fits the working set (or remove the artificially low 8MB cap), and/or switch maxmemory-policy away from noeviction if some eviction is acceptable for this key space; additionally review/alert on Redis OOM errors so the api's fallback path isn't silently masking a broken queue. After fixing memory limits, verify POST /jobs goes back to enqueueing (202, low latency) and the worker resumes consuming jobs from the list normally."
+      },
+      "usage": {
+        "input_tokens": 51241,
+        "output_tokens": 5477,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0
+      },
+      "n_tool_calls": 15,
+      "wall_seconds": 71.9,
+      "trajectory": "trajectories/redis-oom/20260828-215411-09cc.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 0
+    },
+    {
+      "system": "agent",
+      "case": "redis-oom",
+      "model": "claude-sonnet-5",
+      "run_id": "20260828-215624-4a1f",
+      "answer": {
+        "root_cause_component": "api",
+        "root_cause_type": "misconfiguration",
+        "explanation": "The worker only ever processed one job (\"processed job 4ba2542cd272 in 2.0s\" at 21:55:55) despite dozens of POST /jobs requests arriving afterward, and redis `keys *` never shows a job-queue key (only cache:session:* keys), while `llen jobs` is always 0. The worker's redis client sits parked in BLPOP the whole time (client list: cmd=blpop, idle growing) and does not unblock even immediately after the api's RPUSH (client list: cmd=rpush shows fresh activity that never reaches the worker). The worker container has an explicit QUEUE_KEY=jobs env var, but the api container's env has no such QUEUE_KEY variable, so it is very likely pushing jobs onto a different/default list name than the one the worker blocks on (\"jobs\"). Because the enqueued jobs never reach the worker, the api's POST /jobs handler falls through a ~2s wait/timeout path (200 in ~2020-2040ms) instead of getting an actual completion signal from the worker, which is exactly the latency increase the alert is flagging. Postgres and redis themselves show no resource exhaustion (low CPU, no blocking locks, no slowlog entries, empty queue), ruling out DB/queue overload as the cause of the 2s stall.",
+        "evidence": [
+          {
+            "source": "get_logs worker",
+            "quote": "worker-1  | 2026-08-28 21:55:49,068 INFO worker started\nworker-1  | 2026-08-28 21:55:55,416 INFO processed job 4ba2542cd272 in 2.0s"
+          },
+          {
+            "source": "get_logs api",
+            "quote": "api-1  | 2026-08-28 21:58:30,362 INFO POST /jobs -> 200 2024ms"
+          },
+          {
+            "source": "exec_readonly redis-cli llen jobs",
+            "quote": "0"
+          },
+          {
+            "source": "exec_readonly redis-cli keys *",
+            "quote": "cache:session:23\ncache:session:22\n...\ncache:session:12"
+          },
+          {
+            "source": "exec_readonly redis-cli client list",
+            "quote": "id=4 ... cmd=blpop ... lib-name=redis-py\nid=6 ... cmd=rpush ... lib-name=redis-py"
+          },
+          {
+            "source": "docker inspect worker",
+            "quote": "\"QUEUE_KEY=jobs\","
+          },
+          {
+            "source": "docker inspect api",
+            "quote": "\"DATABASE_URL=postgresql://svc:svc_password@postgres:5432/shop\",\n                \"REDIS_URL=redis://redis:6379/0\","
+          },
+          {
+            "source": "exec_readonly psql pg_locks",
+            "quote": "(0 rows)"
+          }
+        ],
+        "suggested_fix": "Align the queue key used by the api producer with the worker's consumer key: set an explicit QUEUE_KEY=jobs env var on the api service (matching worker) or fix the hardcoded/default queue name in the api code so both push and blpop target the same redis list. Also add monitoring/alerting on queue key mismatch (e.g. assert on startup that the configured key is non-empty/reachable) and change the api's job-wait fallback so a failed/never-delivered job returns an error or 202/504 instead of silently returning 200 after a fixed ~2s timeout, so a broken pipeline surfaces as errors rather than pure latency."
+      },
+      "usage": {
+        "input_tokens": 194683,
+        "output_tokens": 14701,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0
+      },
+      "n_tool_calls": 25,
+      "wall_seconds": 196.8,
+      "trajectory": "trajectories/redis-oom/20260828-215624-4a1f.jsonl",
+      "grade": {
+        "component_match": false,
+        "fault_match": true,
+        "correct": false
+      },
+      "repetition": 1
+    },
+    {
+      "system": "agent",
+      "case": "redis-oom",
+      "model": "claude-sonnet-5",
+      "run_id": "20260828-220042-6ba7",
+      "answer": {
+        "root_cause_component": "redis",
+        "root_cause_type": "misconfiguration",
+        "explanation": "A `CONFIG SET maxmemory 8388608` was applied to Redis while it already held ~12MB of data, and the eviction policy is `noeviction`. Redis logged the warning at 22:00:12 and immediately after that timestamp, every POST /jobs call jumped from ~2ms to a near-constant ~2030ms even though the queue depth stayed at 0 and the one job that made it through the queue was processed by the worker in exactly 2.0s. Because maxmemory is now below actual usage and no keys can be evicted, new write commands (the RPUSH used to enqueue a job) are rejected with an OOM error; the API's job-submission path catches this failure and falls back to a synchronous/blocking path (matching the worker's own ~2s per-job processing time) instead of the fast fire-and-forget enqueue, which is why p95 latency on POST /jobs is now pinned at ~2s while error rate stays normal (the fallback still returns 200). The queue and worker themselves are healthy (llen=0, worker up, no crash), so the fault is not in the worker or api code paths but in the Redis memory configuration blocking writes.",
+        "evidence": [
+          {
+            "source": "get_logs redis",
+            "quote": "1:M 28 Aug 2026 22:00:12.547 # WARNING: the new maxmemory value set via CONFIG SET (8388608) is smaller than the current memory usage (12172472). This will result in key eviction and/or the inability to accept new write commands depending on the maxmemory-policy."
+          },
+          {
+            "source": "exec_readonly redis-cli config get maxmemory-policy",
+            "quote": "maxmemory-policy\nnoeviction"
+          },
+          {
+            "source": "exec_readonly redis-cli info memory",
+            "quote": "used_memory:12267224\n...\nmaxmemory:8388608"
+          },
+          {
+            "source": "get_logs api",
+            "quote": "2026-08-28 22:00:11,166 INFO POST /jobs -> 202 2ms"
+          },
+          {
+            "source": "get_logs api",
+            "quote": "2026-08-28 22:00:16,235 INFO POST /jobs -> 200 2030ms"
+          },
+          {
+            "source": "get_logs worker",
+            "quote": "2026-08-28 22:00:13,198 INFO processed job daf3309109d5 in 2.0s"
+          },
+          {
+            "source": "exec_readonly redis-cli llen jobs",
+            "quote": "0"
+          }
+        ],
+        "suggested_fix": "Raise Redis maxmemory back to a value comfortably above current dataset size (or remove the restrictive CONFIG SET entirely), and/or switch maxmemory-policy to an eviction policy appropriate for the jobs queue (e.g. noeviction is fine for durability but only if maxmemory is sized correctly). Also add alerting on Redis OOM/write-rejection errors and make the API fail fast/return 5xx (or retry with backoff+circuit breaker) instead of silently falling back to a slow synchronous path, so future misconfigurations surface as errors rather than hidden latency."
+      },
+      "usage": {
+        "input_tokens": 69663,
+        "output_tokens": 5810,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0
+      },
+      "n_tool_calls": 16,
+      "wall_seconds": 76.5,
+      "trajectory": "trajectories/redis-oom/20260828-220042-6ba7.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 2
+    },
+    {
+      "system": "agent",
+      "case": "pg-connections",
+      "model": "claude-sonnet-5",
+      "run_id": "20260828-220255-d849",
+      "answer": {
+        "root_cause_component": "other",
+        "root_cause_type": "resource_exhaustion",
+        "explanation": "GET /orders returns 5xx because the api's /health check reports db:\"unreachable\" and the api's own traceback shows every new postgres connection attempt failing with \"remaining connection slots are reserved\". Inspecting postgres directly shows why: max_connections is capped at 100, and right now all 100 slots are consumed, with 93 of them owned by a role called \"batch\" (application_name \"psql\", rolconnlimit -1, i.e. unlimited) that is not one of the api/worker/nginx/redis/loadgen stack components. This \"batch\" actor has opened dozens of psql sessions and is holding them (largely idle, no state shown) instead of releasing them, so when the api or worker try to open a new connection there are 0 non-reserved slots left, producing the FATAL \"remaining connection slots are reserved for roles with privileges of the 'pg_use_reserved_connections' role\" error seen both in postgres' log and the api traceback. The worker itself is still healthy and actively processing jobs (connects as role 'svc'), and nginx/redis show no issue, confirming the fault is not in the application code path but in an external/batch workload against postgres exhausting the shared connection pool that the api depends on for GET /orders.",
+        "evidence": [
+          {
+            "source": "get_status",
+            "quote": "GET /health -> 503 {\"db\":\"unreachable\",\"queue\":\"ok\"}"
+          },
+          {
+            "source": "get_logs(api)",
+            "quote": "psycopg.OperationalError: connection failed: connection to server at \"172.21.0.3\", port 5432 failed: FATAL:  remaining connection slots are reserved for roles with privileges of the \"pg_use_reserved_connections\" role"
+          },
+          {
+            "source": "get_logs(postgres)",
+            "quote": "2026-08-28 22:02:36.074 UTC [320] FATAL:  remaining connection slots are reserved for roles with privileges of the \"pg_use_reserved_connections\" role"
+          },
+          {
+            "source": "exec_readonly",
+            "quote": " usename  | state  | count \n----------+--------+-------\n batch    |        |    93\n          |        |     4\n app      |        |     1\n readonly | active |     1"
+          },
+          {
+            "source": "exec_readonly",
+            "quote": " client_addr | application_name | backend_start | state | wait_event_type \n-------------+------------------+---------------+-------+-----------------\n             | psql             |               |       | "
+          },
+          {
+            "source": "exec_readonly",
+            "quote": " current_setting \n-----------------\n 100\n(1 row)"
+          },
+          {
+            "source": "exec_readonly",
+            "quote": " count \n-------\n   100\n(1 row)"
+          },
+          {
+            "source": "docker inspect worker",
+            "quote": "\"DATABASE_URL=postgresql://svc:svc_password@postgres:5432/shop\""
+          }
+        ],
+        "suggested_fix": "Identify and terminate/kill the leaking 'batch' psql sessions (e.g. pg_terminate_backend on idle batch connections) and fix or disable whatever job is opening them without closing; set a sane rolconnlimit for the 'batch' role and an idle_in_transaction_session_timeout / statement_timeout so runaway sessions can't consume the whole pool; consider raising max_connections or, better, put pgbouncer/connection pooling in front of postgres so api/worker connections are multiplexed and isolated from ad-hoc batch usage; add alerting on pg_stat_activity connection counts per role."
+      },
+      "usage": {
+        "input_tokens": 128304,
+        "output_tokens": 5266,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0
+      },
+      "n_tool_calls": 17,
+      "wall_seconds": 75.5,
+      "trajectory": "trajectories/pg-connections/20260828-220255-d849.jsonl",
+      "grade": {
+        "component_match": false,
+        "fault_match": true,
+        "correct": false
+      },
+      "repetition": 0
+    },
+    {
+      "system": "agent",
+      "case": "pg-connections",
+      "model": "claude-sonnet-5",
+      "run_id": "20260828-220506-d763",
+      "answer": {
+        "root_cause_component": "postgres",
+        "root_cause_type": "resource_exhaustion",
+        "explanation": "GET /orders calls api.py's `orders` handler, which opens a fresh psycopg connection to postgres per request. Postgres has max_connections=100, and shortly after the database restarted, an external role called \"batch\" opened ~93 concurrent idle connections (unrelated to the api/worker, which connect as roles \"svc\"/\"app\") with no connection-limit (rolconnlimit=-1) capping it. This leaves only a handful of the reserved/non-reserved slots, so most new connection attempts from the api (\"svc\" role) fail with 'FATAL: remaining connection slots are reserved for roles with privileges of the \"pg_use_reserved_connections\" role'. Since /orders can't get a DB connection, it throws an unhandled OperationalError and returns 5xx, which is what the alert captured. The root cause is therefore connection-pool exhaustion in postgres driven by the unthrottled \"batch\" role, not a defect in the api code itself.",
+        "evidence": [
+          {
+            "source": "get_logs(api)",
+            "quote": "psycopg.OperationalError: connection failed: connection to server at \"172.21.0.3\", port 5432 failed: FATAL:  remaining connection slots are reserved for roles with privileges of the \"pg_use_reserved_connections\" role"
+          },
+          {
+            "source": "exec_readonly(psql pg_stat_activity count)",
+            "quote": " count \n-------\n   100\n(1 row)"
+          },
+          {
+            "source": "exec_readonly(psql usename group by)",
+            "quote": " usename  | state  | count \n----------+--------+-------\n batch    |        |    93\n          |        |     4\n app      |        |     1\n svc      |        |     1\n readonly | active |     1\n(5 rows)"
+          },
+          {
+            "source": "exec_readonly(psql max_connections)",
+            "quote": " name       | setting \n-----------------+---------\n max_connections | 100\n(1 row)"
+          },
+          {
+            "source": "exec_readonly(psql rolconnlimit)",
+            "quote": " rolname  | rolconnlimit \n----------+--------------\n app      |           -1\n svc      |           -1\n batch    |           -1\n readonly |           -1\n(4 rows)"
+          },
+          {
+            "source": "docker inspect api",
+            "quote": "\"DATABASE_URL=postgresql://svc:svc_password@postgres:5432/shop\""
+          },
+          {
+            "source": "get_logs(postgres)",
+            "quote": "2026-08-28 22:04:47.780 UTC [316] FATAL:  remaining connection slots are reserved for roles with privileges of the \"pg_use_reserved_connections\" role"
+          }
+        ],
+        "suggested_fix": "Set a connection limit on the \"batch\" role (e.g. ALTER ROLE batch CONNECTION LIMIT 10) or fix/throttle whatever batch job is opening ~93 concurrent idle psql connections right after DB startup; also consider raising max_connections/using a pgbouncer pool in front of postgres and granting the api's \"svc\" role membership in pg_use_reserved_connections (or reserve a superuser_reserved_connections-style pool) so critical services aren't starved when a batch job misbehaves."
+      },
+      "usage": {
+        "input_tokens": 75111,
+        "output_tokens": 4255,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0
+      },
+      "n_tool_calls": 14,
+      "wall_seconds": 58.3,
+      "trajectory": "trajectories/pg-connections/20260828-220506-d763.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 1
+    },
+    {
+      "system": "agent",
+      "case": "pg-connections",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-022045-9d33",
+      "answer": {
+        "root_cause_component": "postgres",
+        "root_cause_type": "resource_exhaustion",
+        "explanation": "The /orders endpoint returns 5xx because the api's request handler cannot open a database connection: psycopg raises OperationalError \"remaining connection slots are reserved for roles with privileges of the pg_use_reserved_connections role\". Checking postgres directly shows max_connections=100, and 93 of those slots are held open by a single role (\"batch\"), while normal api/worker/svc/app connections only need a handful. This leaves fewer than the reserved margin available for the api's role, so every new connection attempt from the api (and even /health's db check) fails immediately with the reserved-slots error, which the api surfaces as 503s on GET /orders. The worker keeps processing jobs fine because it apparently reuses/holds its own connection and queue access (redis) is unaffected \u2014 confirming the fault is isolated to postgres connection capacity, not the api code, redis, or network path.",
+        "evidence": [
+          {
+            "source": "get_logs(api)",
+            "quote": "psycopg.OperationalError: connection failed: connection to server at \"172.21.0.2\", port 5432 failed: FATAL:  remaining connection slots are reserved for roles with privileges of the \"pg_use_reserved_connections\" role"
+          },
+          {
+            "source": "get_status",
+            "quote": "GET /health -> 503 {\"db\":\"unreachable\",\"queue\":\"ok\"}"
+          },
+          {
+            "source": "exec_readonly(psql pg_stat_activity groupby)",
+            "quote": " usename  | application_name | state  | wait_event_type | wait_event | count \n----------+------------------+--------+-----------------+------------+-------\n batch    | psql             |        |                 |            |    93"
+          },
+          {
+            "source": "exec_readonly(psql SHOW max_connections)",
+            "quote": " current_setting \n-----------------\n 100\n(1 row)"
+          }
+        ],
+        "suggested_fix": "Identify and terminate/close the leaking 'batch' role connections (pg_terminate_backend) and find/fix whatever job is opening 93 psql sessions without releasing them (likely a stuck batch/reporting script). Longer term: set a per-role connection limit (ALTER ROLE batch CONNECTION LIMIT n), add connection pooling (pgbouncer) in front of postgres, and alert on pg_stat_activity connection counts approaching max_connections so this is caught before it starves the api's reserved connections."
+      },
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 3538,
+        "input_tokens": 50327,
+        "cache_read_input_tokens": 0
+      },
+      "n_tool_calls": 12,
+      "wall_seconds": 67.1,
+      "trajectory": "trajectories/pg-connections/20260829-022045-9d33.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 0
+    },
+    {
+      "system": "agent",
+      "case": "api-dns",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-022249-e830",
+      "answer": {
+        "root_cause_component": "api",
+        "root_cause_type": "code_bug",
+        "explanation": "GET /orders calls db_conn(), which does a bare `psycopg.connect(DATABASE_URL, connect_timeout=2)` on every single request instead of reusing a pooled/persistent connection. Each call therefore performs a fresh DNS lookup of the \"postgres\" hostname through Docker's embedded resolver. In this environment that lookup is intermittently failing/timing out (EAI_AGAIN \"Temporary failure in name resolution\"), and because glibc's resolver retries per nameserver with a ~5s timeout, failed lookups block the request thread for exactly 5s or 10s - matching the nginx/loadgen access-log timings (rt=5.01x / rt=10.01x) - after which the handler raises OperationalError and returns 500. In contrast, the API's Redis client and the worker's Postgres usage establish a connection once and keep it alive (redis-cli client list shows the api's redis connection at age=238s, idle=2s, never reconnecting), so they never re-trigger DNS resolution and never see the fault - explaining why POST /jobs and worker job processing succeed continuously while GET /orders fails ~80% of the time. The repeated blocking DB calls also exhaust the app's request-handling threadpool, which is why the container's own /health check (served by the same event loop/threadpool) started timing out and uvicorn was marked unhealthy, even though Postgres itself (pg_stat_activity count=7, healthy container, accepting connections per its own healthcheck) and Redis are both fine.",
+        "evidence": [
+          {
+            "source": "get_logs api",
+            "quote": "psycopg.OperationalError: [Errno -3] Temporary failure in name resolution"
+          },
+          {
+            "source": "get_logs api",
+            "quote": "File \"/srv/api.py\", line 28, in db_conn\n    return psycopg.connect(DATABASE_URL, connect_timeout=2)"
+          },
+          {
+            "source": "get_logs nginx",
+            "quote": "172.21.0.7 \"GET /orders HTTP/1.1\" 500 rt=10.012 urt=10.011"
+          },
+          {
+            "source": "get_logs nginx",
+            "quote": "172.21.0.7 \"POST /jobs HTTP/1.1\" 202 rt=0.003 urt=0.003"
+          },
+          {
+            "source": "get_logs worker",
+            "quote": "worker-1  | 2026-08-29 02:23:44,373 INFO processed job ae725dd3478e in 2.0s"
+          },
+          {
+            "source": "exec_readonly redis-cli client list",
+            "quote": "id=6 addr=172.21.0.5:46288 laddr=172.21.0.3:6379 fd=11 name= age=238 idle=2 flags=N db=0 ... cmd=ping user=default redir=-1 resp=2 lib-name=redis-py lib-ver=5.2.1"
+          },
+          {
+            "source": "get_status",
+            "quote": "incident-lab-api-1        incident-lab-api         \"uvicorn api:app --h\u2026\"   api        40 seconds ago   Up 34 seconds (unhealthy)"
+          },
+          {
+            "source": "exec_readonly psql",
+            "quote": " count \n-------\n     7\n(1 row)"
+          }
+        ],
+        "suggested_fix": "Add a persistent connection pool (e.g. psycopg_pool / SQLAlchemy pool) for Postgres in the api service instead of calling psycopg.connect() on every request, so DNS resolution and TCP handshake happen once (or a bounded number of times) rather than per-request. Separately, investigate/harden the docker-compose network's embedded DNS (127.0.0.11) reliability for the 'postgres' name (e.g. check for network churn, restart the container network, or add a short-TTL local resolver/cache) since it is the proximate trigger; also add a strict overall request timeout and circuit-breaker around DB calls so a DNS/connect stall can't exhaust the app's request threadpool and take down the /health check with it."
+      },
+      "usage": {
+        "input_tokens": 296773,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 17168
+      },
+      "n_tool_calls": 18,
+      "wall_seconds": 236.4,
+      "trajectory": "trajectories/api-dns/20260829-022249-e830.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": false,
+        "correct": false
+      },
+      "repetition": 0
+    },
+    {
+      "system": "agent",
+      "case": "api-dns",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-022740-9cf4",
+      "answer": {
+        "root_cause_component": "api",
+        "root_cause_type": "network",
+        "explanation": "GET /orders (and /health) call db_conn(), which opens a brand-new psycopg connection to host \"postgres\" on every request. That connect() call is failing consistently with a DNS resolution error (EAI_AGAIN / \"Temporary failure in name resolution\") from inside the api container, causing the request to hang until the retry/backoff completes and then return 500 - exactly matching the escalating 5s/10s response times seen at nginx. Postgres itself is proven healthy and reachable: it is 'healthy' in docker status, pg_stat_activity shows a normal, low connection count (7), and the worker container - on the very same docker network, resolving the very same hostname \"postgres\" - keeps connecting and successfully processing jobs the whole time. POST /jobs (which only touches redis, using a connection that doesn't need a fresh per-request DNS lookup) also keeps returning 202 throughout the incident. This isolates the fault to the api container's ability to resolve the \"postgres\" DNS name specifically (its embedded docker DNS resolution path), not to Postgres availability, redis, or the shared docker network as a whole, since other containers on the same network resolve the same name without issue.",
+        "evidence": [
+          {
+            "source": "get_logs api",
+            "quote": "File \"/srv/api.py\", line 28, in db_conn\napi-1  |     return psycopg.connect(DATABASE_URL, connect_timeout=2)\napi-1  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\napi-1  | psycopg.OperationalError: [Errno -3] Temporary failure in name resolution"
+          },
+          {
+            "source": "get_logs nginx",
+            "quote": "172.21.0.7 \"GET /orders HTTP/1.1\" 500 rt=10.012 urt=10.011"
+          },
+          {
+            "source": "get_logs worker",
+            "quote": "worker-1  | 2026-08-29 02:28:11,933 INFO processed job c25b8db71766 in 2.0s"
+          },
+          {
+            "source": "exec_readonly psql",
+            "quote": " count \n-------\n     7\n(1 row)"
+          },
+          {
+            "source": "get_status",
+            "quote": "GET /health failed: timed out"
+          }
+        ],
+        "suggested_fix": "Recreate/restart the api container to reset its network namespace and DNS resolver state (docker compose restart api), and check the api service definition for any custom dns/dns_search/extra_hosts override that could differ from the other services. Longer-term, add DNS/connect retry with backoff and switch to a pooled DB connection (e.g. psycopg_pool) so a single container-local DNS hiccup doesn't fail every request, and add an explicit alert on api container health-check failures so this failure mode is caught immediately."
+      },
+      "usage": {
+        "input_tokens": 176099,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 13403
+      },
+      "n_tool_calls": 16,
+      "wall_seconds": 184.0,
+      "trajectory": "trajectories/api-dns/20260829-022740-9cf4.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 1
+    },
+    {
+      "system": "agent",
+      "case": "api-dns",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-023147-147b",
+      "answer": {
+        "root_cause_component": "api",
+        "root_cause_type": "resource_exhaustion",
+        "explanation": "GET /orders and GET /health in the api service fail because psycopg.connect() cannot even resolve the \"postgres\" hostname (EAI_AGAIN / \"Temporary failure in name resolution\"), i.e. the failure happens before a TCP connection to Postgres is attempted. Postgres itself is healthy and fully reachable throughout the incident window: the worker container, using the identical DATABASE_URL/hostname on the same docker network, keeps successfully connecting and processing jobs the whole time, and pg_stat_activity shows no connection-limit or backlog problems. The asymmetry (api fails, worker succeeds, same network/DNS server) rules out a broken postgres, redis, or network/DNS-server-wide fault. The api's /orders handler opens a brand-new, unpooled psycopg connection (and therefore a fresh DNS lookup) on every single request, and this is compounded by the docker healthcheck hitting /health every 5s and also trying to connect to the DB with multi-second timeouts. Under the loadgen's steady traffic this per-request connect/DNS-lookup churn exhausts a client-side resource in the api container (socket/file-descriptor budget) after the very first request succeeds, so every subsequent getaddrinfo() call for \"postgres\" fails, producing 5-10s hangs and 5xx/503s that match the alert while CPU/memory/PID counts on the container remain nominal (ruling out CPU/mem exhaustion or a cgroup limit).</explanation>\n<parameter name=\"evidence\">[{\"source\":\"get_logs api\",\"quote\":\"psycopg.OperationalError: [Errno -3] Temporary failure in name resolution\"},{\"source\":\"get_logs api\",\"quote\":\"File \\\"/srv/api.py\\\", line 28, in db_conn\\n    return psycopg.connect(DATABASE_URL, connect_timeout=2)\"},{\"source\":\"get_logs nginx\",\"quote\":\"172.21.0.7 \\\"GET /orders HTTP/1.1\\\" 200 rt=0.024 urt=0.023\\nnginx-1  | 172.21.0.7 \\\"POST /jobs HTTP/1.1\\\" 202 rt=0.004 urt=0.004\\n... 172.21.0.7 \\\"GET /orders HTTP/1.1\\\" 500 rt=10.012 urt=10.011\"},{\"source\":\"get_logs worker\",\"quote\":\"worker-1  | 2026-08-29 02:32:26,416 INFO processed job 03fcdda00687 in 2.0s\\nworker-1  | 2026-08-29 02:32:39,448 INFO processed job 1b394734978d in 2.0s\"},{\"source\":\"exec_readonly docker stats\",\"quote\":\"a93dc57a81a0   incident-lab-api-1        0.25%     41.37MiB / 62.47GiB   0.06%     22.8kB / 16.3kB   184kB / 852kB     3\"},{\"source\":\"exec_readonly psql\",\"quote\":\" client_addr | usename  | state  | count \\n-------------+----------+--------+-------\\n             |          |        |     4\\n             | app      |        |     1\\n             | readonly | active |     1\"}]",
+        "evidence": [],
+        "suggested_fix": "Introduce a proper connection pool (e.g. psycopg_pool.ConnectionPool) in the api so DB connections/DNS lookups aren't re-established on every request; raise/verify the container's nofile ulimit; add caching/backoff so /health doesn't repeatedly hammer a failing DB path every 5s; and add circuit-breaking/retry-with-jitter around db_conn() so a slow dependency degrades gracefully instead of exhausting client-side sockets."
+      },
+      "usage": {
+        "input_tokens": 207822,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 19470
+      },
+      "n_tool_calls": 17,
+      "wall_seconds": 258.1,
+      "trajectory": "trajectories/api-dns/20260829-023147-147b.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": false,
+        "correct": false
+      },
+      "repetition": 2
+    },
+    {
+      "system": "agent",
+      "case": "worker-oom",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-023723-0b88",
+      "answer": {
+        "root_cause_component": "worker",
+        "root_cause_type": "resource_exhaustion",
+        "explanation": "The worker container is configured with a hard memory limit of only 20MB (HostConfig.Memory=20971520). Under normal load the worker process quickly exceeds this cgroup limit and the kernel OOM-kills it (ExitCode 137, OOMKilled:true), causing docker's restart policy to loop it (RestartCount=9, status 'Restarting'). Because the worker never stays up long enough to consume from the queue, the redis 'jobs' list backlog grows continuously and no new reports are written, exactly matching the alert. Redis, postgres, api and nginx are all healthy and not implicated - the fault is purely the consumer process being killed by its own resource cap before it can drain the queue.",
+        "evidence": [
+          {
+            "source": "get_status",
+            "quote": "incident-lab-worker-1     incident-lab-worker      \"python worker.py\"       worker     55 seconds ago   Restarting (137) 12 seconds ago"
+          },
+          {
+            "source": "exec_readonly docker inspect worker",
+            "quote": "\"OOMKilled\": true,\n        \"Dead\": false,\n        \"Pid\": 0,\n        \"ExitCode\": 137,"
+          },
+          {
+            "source": "exec_readonly docker inspect worker",
+            "quote": "\"RestartCount\": 9,"
+          },
+          {
+            "source": "exec_readonly docker inspect worker",
+            "quote": "\"Memory\": 20971520,"
+          },
+          {
+            "source": "exec_readonly redis-cli llen jobs",
+            "quote": "15"
+          }
+        ],
+        "suggested_fix": "Raise (or remove) the worker service's memory limit in docker-compose.yml (currently ~20MB, far too low for a Python process) to a realistic value (e.g. 256-512MB), then redeploy/restart the worker so it can run continuously and drain the backlog. Also add alerting on container OOMKilled/RestartCount so future limit mis-sizing is caught immediately."
+      },
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "input_tokens": 16354,
+        "output_tokens": 1416
+      },
+      "n_tool_calls": 7,
+      "wall_seconds": 21.2,
+      "trajectory": "trajectories/worker-oom/20260829-023723-0b88.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 0
+    },
+    {
+      "system": "agent",
+      "case": "worker-oom",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-023855-f181",
+      "answer": {
+        "root_cause_component": "worker",
+        "root_cause_type": "resource_exhaustion",
+        "explanation": "The worker container is configured with a hard memory limit of only 20MB (HostConfig.Memory=20971520). The worker process exceeds this almost immediately after starting, so the kernel OOM-kills it (ExitCode 137, OOMKilled: true) and Docker's restart policy relaunches it, only for it to be killed again seconds later (RestartCount already at 9 within under a minute). Because the worker never stays alive long enough to complete a consume-process-write cycle, jobs pile up on the redis 'jobs' list (currently depth 14 and growing) while no reports are written, exactly matching the QueueBacklog alert. The api and redis themselves are healthy (health endpoint OK, redis responsive), confirming the fault is isolated to the worker's own resource constraint rather than its dependencies.",
+        "evidence": [
+          {
+            "source": "get_status",
+            "quote": "incident-lab-worker-1     incident-lab-worker      \"python worker.py\"       worker     55 seconds ago   Up 48 seconds ... Restarting (137) 12 seconds ago"
+          },
+          {
+            "source": "exec_readonly docker inspect worker",
+            "quote": "\"OOMKilled\": true,\n        \"Dead\": false,\n        \"Pid\": 0,\n        \"ExitCode\": 137,"
+          },
+          {
+            "source": "exec_readonly docker inspect worker",
+            "quote": "\"RestartCount\": 9,"
+          },
+          {
+            "source": "exec_readonly docker inspect worker",
+            "quote": "\"Memory\": 20971520,"
+          },
+          {
+            "source": "exec_readonly redis-cli llen jobs",
+            "quote": "14"
+          }
+        ],
+        "suggested_fix": "Raise (or remove) the memory limit on the worker service in docker-compose.yml (e.g. mem_limit/deploy.resources.limits.memory) to a value sufficient for its actual working set, then redeploy/restart the worker so it can stay up, drain the backlog, and resume writing reports. Also add memory alerting/monitoring on the worker container to catch under-provisioned limits earlier."
+      },
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "input_tokens": 18051,
+        "output_tokens": 1488
+      },
+      "n_tool_calls": 7,
+      "wall_seconds": 20.8,
+      "trajectory": "trajectories/worker-oom/20260829-023855-f181.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 1
+    },
+    {
+      "system": "agent",
+      "case": "worker-oom",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-024025-879e",
+      "answer": {
+        "root_cause_component": "worker",
+        "root_cause_type": "resource_exhaustion",
+        "explanation": "The report worker container is being OOM-killed repeatedly (docker inspect shows OOMKilled: true, ExitCode 137, RestartCount 9, Status 'Restarting') because its cgroup memory limit is set to only 20MB (HostConfig.Memory: 20971520). Each time it starts, it barely logs 'worker started' before the kernel OOM-killer kills it, so it never finishes processing/writing a report. Meanwhile redis and postgres are healthy and reachable (queue depth 15 and rising, /health reports db/queue ok), and jobs keep being enqueued by the api/loadgen, so the 'jobs' list backlog grows continuously with no reports written \u2014 exactly matching the alert. The root cause is not in redis or postgres; it's a misconfigured/too-small memory limit on the worker service starving it of resources needed to run.",
+        "evidence": [
+          {
+            "source": "get_status",
+            "quote": "incident-lab-worker-1     incident-lab-worker      \"python worker.py\"       worker     55 seconds ago   Restarting (137) 12 seconds ago"
+          },
+          {
+            "source": "exec_readonly docker inspect worker",
+            "quote": "\"OOMKilled\": true,\n            \"Dead\": false,\n            \"Pid\": 0,\n            \"ExitCode\": 137,"
+          },
+          {
+            "source": "exec_readonly docker inspect worker",
+            "quote": "\"RestartCount\": 9,"
+          },
+          {
+            "source": "exec_readonly docker inspect worker",
+            "quote": "\"Memory\": 20971520,"
+          },
+          {
+            "source": "exec_readonly redis-cli llen jobs",
+            "quote": "15"
+          },
+          {
+            "source": "get_logs worker",
+            "quote": "worker-1  | 2026-08-29 02:39:40,535 INFO worker started"
+          }
+        ],
+        "suggested_fix": "Raise (or remove) the worker container's memory limit in docker-compose.yml (currently ~20MB, far too low for a Python process) to a realistic value (e.g. 256-512MB depending on job payload sizes), then redeploy/restart the worker service. Also add alerting on container OOMKilled/restart events so this surfaces immediately instead of only via queue backlog."
+      },
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "input_tokens": 21760,
+        "output_tokens": 1643
+      },
+      "n_tool_calls": 6,
+      "wall_seconds": 22.4,
+      "trajectory": "trajectories/worker-oom/20260829-024025-879e.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 2
+    },
+    {
+      "system": "agent",
+      "case": "worker-wrong-queue",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-024210-8c8d",
+      "answer": {
+        "root_cause_component": "worker",
+        "root_cause_type": "misconfiguration",
+        "explanation": "The api enqueues jobs on the redis list 'jobs' (its default queue key, since no QUEUE_KEY env var is set for the api container), while the worker container was deployed with QUEUE_KEY=jobs-reporting, so it BLPOPs from a completely different, permanently-empty list. As a result the worker sits idle (only logged 'worker started', no processing activity) while the 'jobs' list backlog grows unbounded and no reports are ever written, exactly matching the alert. This is a pure queue-name mismatch between the two services, not a crash, resource, or network problem \u2014 both containers are up and healthy per docker compose ps and /health.",
+        "evidence": [
+          {
+            "source": "exec_readonly redis-cli llen jobs",
+            "quote": "15"
+          },
+          {
+            "source": "exec_readonly redis-cli llen jobs-reporting",
+            "quote": "0"
+          },
+          {
+            "source": "docker inspect worker",
+            "quote": "\"QUEUE_KEY=jobs-reporting\","
+          },
+          {
+            "source": "docker inspect api",
+            "quote": "\"REDIS_URL=redis://redis:6379/0\",\n                \"DATABASE_URL=postgresql://svc:svc_password@postgres:5432/shop\","
+          },
+          {
+            "source": "get_logs worker",
+            "quote": "worker-1  | 2026-08-29 02:41:30,860 INFO worker started"
+          },
+          {
+            "source": "get_status",
+            "quote": "GET /health -> 200 {\"db\":\"ok\",\"queue\":\"ok\"}"
+          }
+        ],
+        "suggested_fix": "Align the queue key configuration between api and worker: either remove the QUEUE_KEY=jobs-reporting override from the worker service in docker-compose.yml (so it falls back to the same default 'jobs' the api uses), or explicitly set QUEUE_KEY=jobs on both services. After the fix, verify redis-cli llen jobs drains and worker logs show job processing again."
+      },
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "input_tokens": 22891,
+        "output_tokens": 1709
+      },
+      "n_tool_calls": 7,
+      "wall_seconds": 20.7,
+      "trajectory": "trajectories/worker-wrong-queue/20260829-024210-8c8d.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 0
+    },
+    {
+      "system": "agent",
+      "case": "worker-wrong-queue",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-024352-e865",
+      "answer": {
+        "root_cause_component": "worker",
+        "root_cause_type": "misconfiguration",
+        "explanation": "The worker container was started with an environment override QUEUE_KEY=jobs-reporting, while the api service (which has no QUEUE_KEY override, so it uses the default queue name \"jobs\") enqueues incoming job requests onto the redis list \"jobs\". The worker is therefore blocking/polling on the wrong list (\"jobs-reporting\", confirmed empty via LLEN) and never sees any of the jobs the api pushes into \"jobs\" (confirmed growing to 15 and rising). Since the worker's blocking read/poll on an empty list is not an error condition, it logs nothing beyond startup, which is why no failures appear in worker logs even though no reports are written. This is a pure configuration mismatch between the two services' queue key, not a crash, network, or resource problem \u2014 both redis and postgres are healthy and reachable (api /health returns db:ok, queue:ok).",
+        "evidence": [
+          {
+            "source": "exec_readonly redis-cli llen jobs",
+            "quote": "15"
+          },
+          {
+            "source": "exec_readonly redis-cli llen jobs-reporting",
+            "quote": "0"
+          },
+          {
+            "source": "exec_readonly docker inspect worker",
+            "quote": "\"REDIS_URL=redis://redis:6379/0\",\n                \"QUEUE_KEY=jobs-reporting\","
+          },
+          {
+            "source": "exec_readonly docker inspect api",
+            "quote": "\"REDIS_URL=redis://redis:6379/0\",\n                \"DATABASE_URL=postgresql://svc:svc_password@postgres:5432/shop\","
+          },
+          {
+            "source": "get_logs worker",
+            "quote": "worker-1  | 2026-08-29 02:43:13,128 INFO worker started"
+          },
+          {
+            "source": "get_status",
+            "quote": "GET /health -> 200 {\"db\":\"ok\",\"queue\":\"ok\"}"
+          }
+        ],
+        "suggested_fix": "Align the queue key configuration between the api and worker services \u2014 either remove the QUEUE_KEY=jobs-reporting override from the worker's environment (docker-compose.yml / .env) so it defaults to \"jobs\" like the api, or explicitly set the same QUEUE_KEY on both services. After fixing, restart the worker and verify LLEN jobs drains and reports count increases."
+      },
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "input_tokens": 32252,
+        "output_tokens": 1828
+      },
+      "n_tool_calls": 9,
+      "wall_seconds": 23.5,
+      "trajectory": "trajectories/worker-wrong-queue/20260829-024352-e865.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 1
+    },
+    {
+      "system": "agent",
+      "case": "worker-wrong-queue",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-024538-6bf0",
+      "answer": {
+        "root_cause_component": "worker",
+        "root_cause_type": "misconfiguration",
+        "explanation": "The api enqueues jobs with RPUSH onto the default Redis list key (\"jobs\", confirmed by the alert and by the api's redis client in `client list` showing cmd=rpush), while the worker container was started with an overridden QUEUE_KEY=jobs-reporting environment variable and is doing BLPOP against that different key. As a result the worker is idle/blocked waiting on an empty list that nothing ever pushes to, while jobs pile up unconsumed on the \"jobs\" list the api actually writes to. This produces exactly the observed symptom: steady queue growth on 'jobs' with zero report writes, despite the worker process being up, healthy, and connected to Redis with no errors in its logs.",
+        "evidence": [
+          {
+            "source": "exec_readonly redis-cli llen jobs",
+            "quote": "16"
+          },
+          {
+            "source": "docker inspect worker",
+            "quote": "\"REDIS_URL=redis://redis:6379/0\",\n                \"QUEUE_KEY=jobs-reporting\","
+          },
+          {
+            "source": "docker inspect api",
+            "quote": "\"DATABASE_URL=postgresql://svc:svc_password@postgres:5432/shop\",\n                \"REDIS_URL=redis://redis:6379/0\","
+          },
+          {
+            "source": "exec_readonly redis-cli client list",
+            "quote": "id=6 addr=172.21.0.5:35746 laddr=172.21.0.3:6379 ... cmd=rpush user=default ...\nid=9 addr=172.21.0.4:47572 laddr=172.21.0.3:6379 ... flags=b ... cmd=blpop user=default"
+          },
+          {
+            "source": "get_logs worker",
+            "quote": "worker-1  | 2026-08-29 02:44:58,390 INFO worker started"
+          }
+        ],
+        "suggested_fix": "Remove the QUEUE_KEY=jobs-reporting override from the worker service definition (or align it with the api's queue key, e.g. set QUEUE_KEY=jobs consistently for both services via a shared env var), then restart the worker so it consumes from the same Redis list the api publishes to. Also add a startup assertion/metric comparing configured queue key between api and worker to catch this class of drift earlier."
+      },
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "input_tokens": 41594,
+        "output_tokens": 2389
+      },
+      "n_tool_calls": 11,
+      "wall_seconds": 32.3,
+      "trajectory": "trajectories/worker-wrong-queue/20260829-024538-6bf0.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 2
+    }
+  ]
+}

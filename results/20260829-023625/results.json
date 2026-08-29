@@ -1,0 +1,166 @@
+{
+  "meta": {
+    "model": "claude-sonnet-5",
+    "repetitions": 3,
+    "cases": [
+      "worker-oom"
+    ],
+    "systems": [
+      "agent"
+    ],
+    "started": "2026-08-29T02:36:25+00:00"
+  },
+  "rows": [
+    {
+      "system": "agent",
+      "case": "worker-oom",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-023723-0b88",
+      "answer": {
+        "root_cause_component": "worker",
+        "root_cause_type": "resource_exhaustion",
+        "explanation": "The worker container is configured with a hard memory limit of only 20MB (HostConfig.Memory=20971520). Under normal load the worker process quickly exceeds this cgroup limit and the kernel OOM-kills it (ExitCode 137, OOMKilled:true), causing docker's restart policy to loop it (RestartCount=9, status 'Restarting'). Because the worker never stays up long enough to consume from the queue, the redis 'jobs' list backlog grows continuously and no new reports are written, exactly matching the alert. Redis, postgres, api and nginx are all healthy and not implicated - the fault is purely the consumer process being killed by its own resource cap before it can drain the queue.",
+        "evidence": [
+          {
+            "source": "get_status",
+            "quote": "incident-lab-worker-1     incident-lab-worker      \"python worker.py\"       worker     55 seconds ago   Restarting (137) 12 seconds ago"
+          },
+          {
+            "source": "exec_readonly docker inspect worker",
+            "quote": "\"OOMKilled\": true,\n        \"Dead\": false,\n        \"Pid\": 0,\n        \"ExitCode\": 137,"
+          },
+          {
+            "source": "exec_readonly docker inspect worker",
+            "quote": "\"RestartCount\": 9,"
+          },
+          {
+            "source": "exec_readonly docker inspect worker",
+            "quote": "\"Memory\": 20971520,"
+          },
+          {
+            "source": "exec_readonly redis-cli llen jobs",
+            "quote": "15"
+          }
+        ],
+        "suggested_fix": "Raise (or remove) the worker service's memory limit in docker-compose.yml (currently ~20MB, far too low for a Python process) to a realistic value (e.g. 256-512MB), then redeploy/restart the worker so it can run continuously and drain the backlog. Also add alerting on container OOMKilled/RestartCount so future limit mis-sizing is caught immediately."
+      },
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "input_tokens": 16354,
+        "output_tokens": 1416
+      },
+      "n_tool_calls": 7,
+      "wall_seconds": 21.2,
+      "trajectory": "trajectories/worker-oom/20260829-023723-0b88.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 0
+    },
+    {
+      "system": "agent",
+      "case": "worker-oom",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-023855-f181",
+      "answer": {
+        "root_cause_component": "worker",
+        "root_cause_type": "resource_exhaustion",
+        "explanation": "The worker container is configured with a hard memory limit of only 20MB (HostConfig.Memory=20971520). The worker process exceeds this almost immediately after starting, so the kernel OOM-kills it (ExitCode 137, OOMKilled: true) and Docker's restart policy relaunches it, only for it to be killed again seconds later (RestartCount already at 9 within under a minute). Because the worker never stays alive long enough to complete a consume-process-write cycle, jobs pile up on the redis 'jobs' list (currently depth 14 and growing) while no reports are written, exactly matching the QueueBacklog alert. The api and redis themselves are healthy (health endpoint OK, redis responsive), confirming the fault is isolated to the worker's own resource constraint rather than its dependencies.",
+        "evidence": [
+          {
+            "source": "get_status",
+            "quote": "incident-lab-worker-1     incident-lab-worker      \"python worker.py\"       worker     55 seconds ago   Up 48 seconds ... Restarting (137) 12 seconds ago"
+          },
+          {
+            "source": "exec_readonly docker inspect worker",
+            "quote": "\"OOMKilled\": true,\n        \"Dead\": false,\n        \"Pid\": 0,\n        \"ExitCode\": 137,"
+          },
+          {
+            "source": "exec_readonly docker inspect worker",
+            "quote": "\"RestartCount\": 9,"
+          },
+          {
+            "source": "exec_readonly docker inspect worker",
+            "quote": "\"Memory\": 20971520,"
+          },
+          {
+            "source": "exec_readonly redis-cli llen jobs",
+            "quote": "14"
+          }
+        ],
+        "suggested_fix": "Raise (or remove) the memory limit on the worker service in docker-compose.yml (e.g. mem_limit/deploy.resources.limits.memory) to a value sufficient for its actual working set, then redeploy/restart the worker so it can stay up, drain the backlog, and resume writing reports. Also add memory alerting/monitoring on the worker container to catch under-provisioned limits earlier."
+      },
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "input_tokens": 18051,
+        "output_tokens": 1488
+      },
+      "n_tool_calls": 7,
+      "wall_seconds": 20.8,
+      "trajectory": "trajectories/worker-oom/20260829-023855-f181.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 1
+    },
+    {
+      "system": "agent",
+      "case": "worker-oom",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-024025-879e",
+      "answer": {
+        "root_cause_component": "worker",
+        "root_cause_type": "resource_exhaustion",
+        "explanation": "The report worker container is being OOM-killed repeatedly (docker inspect shows OOMKilled: true, ExitCode 137, RestartCount 9, Status 'Restarting') because its cgroup memory limit is set to only 20MB (HostConfig.Memory: 20971520). Each time it starts, it barely logs 'worker started' before the kernel OOM-killer kills it, so it never finishes processing/writing a report. Meanwhile redis and postgres are healthy and reachable (queue depth 15 and rising, /health reports db/queue ok), and jobs keep being enqueued by the api/loadgen, so the 'jobs' list backlog grows continuously with no reports written \u2014 exactly matching the alert. The root cause is not in redis or postgres; it's a misconfigured/too-small memory limit on the worker service starving it of resources needed to run.",
+        "evidence": [
+          {
+            "source": "get_status",
+            "quote": "incident-lab-worker-1     incident-lab-worker      \"python worker.py\"       worker     55 seconds ago   Restarting (137) 12 seconds ago"
+          },
+          {
+            "source": "exec_readonly docker inspect worker",
+            "quote": "\"OOMKilled\": true,\n            \"Dead\": false,\n            \"Pid\": 0,\n            \"ExitCode\": 137,"
+          },
+          {
+            "source": "exec_readonly docker inspect worker",
+            "quote": "\"RestartCount\": 9,"
+          },
+          {
+            "source": "exec_readonly docker inspect worker",
+            "quote": "\"Memory\": 20971520,"
+          },
+          {
+            "source": "exec_readonly redis-cli llen jobs",
+            "quote": "15"
+          },
+          {
+            "source": "get_logs worker",
+            "quote": "worker-1  | 2026-08-29 02:39:40,535 INFO worker started"
+          }
+        ],
+        "suggested_fix": "Raise (or remove) the worker container's memory limit in docker-compose.yml (currently ~20MB, far too low for a Python process) to a realistic value (e.g. 256-512MB depending on job payload sizes), then redeploy/restart the worker service. Also add alerting on container OOMKilled/restart events so this surfaces immediately instead of only via queue backlog."
+      },
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "input_tokens": 21760,
+        "output_tokens": 1643
+      },
+      "n_tool_calls": 6,
+      "wall_seconds": 22.4,
+      "trajectory": "trajectories/worker-oom/20260829-024025-879e.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 2
+    }
+  ]
+}

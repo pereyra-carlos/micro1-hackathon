@@ -1,0 +1,60 @@
+{
+  "meta": {
+    "model": "claude-sonnet-5",
+    "repetitions": 1,
+    "cases": [
+      "pg-connections"
+    ],
+    "systems": [
+      "agent"
+    ],
+    "started": "2026-08-29T02:20:01+00:00"
+  },
+  "rows": [
+    {
+      "system": "agent",
+      "case": "pg-connections",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-022045-9d33",
+      "answer": {
+        "root_cause_component": "postgres",
+        "root_cause_type": "resource_exhaustion",
+        "explanation": "The /orders endpoint returns 5xx because the api's request handler cannot open a database connection: psycopg raises OperationalError \"remaining connection slots are reserved for roles with privileges of the pg_use_reserved_connections role\". Checking postgres directly shows max_connections=100, and 93 of those slots are held open by a single role (\"batch\"), while normal api/worker/svc/app connections only need a handful. This leaves fewer than the reserved margin available for the api's role, so every new connection attempt from the api (and even /health's db check) fails immediately with the reserved-slots error, which the api surfaces as 503s on GET /orders. The worker keeps processing jobs fine because it apparently reuses/holds its own connection and queue access (redis) is unaffected \u2014 confirming the fault is isolated to postgres connection capacity, not the api code, redis, or network path.",
+        "evidence": [
+          {
+            "source": "get_logs(api)",
+            "quote": "psycopg.OperationalError: connection failed: connection to server at \"172.21.0.2\", port 5432 failed: FATAL:  remaining connection slots are reserved for roles with privileges of the \"pg_use_reserved_connections\" role"
+          },
+          {
+            "source": "get_status",
+            "quote": "GET /health -> 503 {\"db\":\"unreachable\",\"queue\":\"ok\"}"
+          },
+          {
+            "source": "exec_readonly(psql pg_stat_activity groupby)",
+            "quote": " usename  | application_name | state  | wait_event_type | wait_event | count \n----------+------------------+--------+-----------------+------------+-------\n batch    | psql             |        |                 |            |    93"
+          },
+          {
+            "source": "exec_readonly(psql SHOW max_connections)",
+            "quote": " current_setting \n-----------------\n 100\n(1 row)"
+          }
+        ],
+        "suggested_fix": "Identify and terminate/close the leaking 'batch' role connections (pg_terminate_backend) and find/fix whatever job is opening 93 psql sessions without releasing them (likely a stuck batch/reporting script). Longer term: set a per-role connection limit (ALTER ROLE batch CONNECTION LIMIT n), add connection pooling (pgbouncer) in front of postgres, and alert on pg_stat_activity connection counts approaching max_connections so this is caught before it starves the api's reserved connections."
+      },
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 3538,
+        "input_tokens": 50327,
+        "cache_read_input_tokens": 0
+      },
+      "n_tool_calls": 12,
+      "wall_seconds": 67.1,
+      "trajectory": "trajectories/pg-connections/20260829-022045-9d33.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 0
+    }
+  ]
+}
