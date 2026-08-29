@@ -10,7 +10,7 @@ PY := $(VENV)/bin/python
 CASE ?=
 N ?= 3
 
-.PHONY: help setup test up down reset break smoke run eval validate clean
+.PHONY: help setup test up down reset break smoke run eval render validate clean
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -45,6 +45,9 @@ run: ## Diagnose the current lab state with the agent: make run CASE=<id>
 
 eval: ## Full evaluation: N repetitions of every case, baseline vs agent
 	$(PY) -m eval.run --repetitions $(N)
+
+render: ## Regenerate markdown views of all trajectories
+	$(PY) -m agent.render
 
 validate: ## Prove a fresh clone works: setup+test+up+smoke+down in a temp dir
 	./scripts/validate.sh
