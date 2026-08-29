@@ -59,7 +59,7 @@ Both print a JSON object whose `answer` holds the structured diagnosis
 ## Full evaluation
 
 ```bash
-make eval                                        # 6 cases x N=3 x both systems
+make eval                                        # 10 cases x N=3 x both systems
 .venv/bin/python -m eval.run --systems agent     # agent only (frozen baseline)
 .venv/bin/python -m eval.run --case redis-oom --repetitions 1   # one slice
 ```
@@ -93,7 +93,7 @@ and merge, as documented in `results/20260829-v1-agent/results.json` meta.
 ## Tests and clean-clone validation
 
 ```bash
-make test       # 64 unit tests: grading, both tool allowlists, cases schema,
+make test       # 66 unit tests: grading, both tool allowlists, cases schema,
                 # trajectory writer, renderer, text helpers. No docker, no key.
 make validate   # git-archives HEAD into a temp dir, then setup + test + up +
                 # smoke + down there, under an isolated compose project/port.
