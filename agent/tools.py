@@ -23,6 +23,70 @@ REDIS_SUBCOMMANDS = {
 
 MAX_LOG_LINES = 500
 
+# Services that can originate a probe (must have a usable exec environment)
+# and lab services that listen on a port, with their default ports.
+PROBE_SOURCES = ["api", "worker", "nginx", "redis", "postgres"]
+PROBE_TARGET_PORTS = {"postgres": 5432, "redis": 6379, "api": 8000, "nginx": 80}
+# python:*-slim images probe via the stdlib; alpine-based images via busybox.
+PYTHON_SOURCES = {"api", "worker"}
+
+_PROBE_SCRIPT = """\
+import socket, sys
+host, port = sys.argv[1], int(sys.argv[2])
+try:
+    infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    addrs = sorted({info[4][0] for info in infos})
+    print(f"dns: {host} -> {', '.join(addrs)}")
+except OSError as exc:
+    print(f"dns: FAILED to resolve {host!r}: {exc}")
+    sys.exit(0)
+try:
+    with socket.create_connection((addrs[0], port), timeout=3):
+        print(f"tcp: connect {addrs[0]}:{port} OK")
+except OSError as exc:
+    print(f"tcp: connect {addrs[0]}:{port} FAILED: {exc}")
+"""
+
+
+def validate_probe(from_service: str, target: str) -> dict:
+    """Parse a probe request into a plan, or raise ValueError."""
+    if from_service not in PROBE_SOURCES:
+        raise ValueError(f"from_service must be one of {PROBE_SOURCES}")
+    host, _, port_text = str(target).partition(":")
+    if host not in PROBE_TARGET_PORTS:
+        raise ValueError(
+            f"target must be a lab service {sorted(PROBE_TARGET_PORTS)}, "
+            "optionally with ':port'"
+        )
+    if port_text:
+        if not port_text.isdigit() or not 1 <= int(port_text) <= 65535:
+            raise ValueError(f"invalid port {port_text!r}")
+        port = int(port_text)
+    else:
+        port = PROBE_TARGET_PORTS[host]
+    return {"kind": "probe", "from_service": from_service, "host": host, "port": port}
+
+
+def _execute_probe(plan: dict) -> str:
+    exec_prefix = lab.COMPOSE + ["exec", "-T", plan["from_service"]]
+    host, port = plan["host"], str(plan["port"])
+    if plan["from_service"] in PYTHON_SOURCES:
+        _, out = lab.run(exec_prefix + ["python3", "-c", _PROBE_SCRIPT, host, port])
+        return out
+    rc, dns_out = lab.run(exec_prefix + ["nslookup", host])
+    lines = [f"dns lookup of {host!r} (nslookup, rc={rc}):", dns_out.strip()]
+    rc, _ = lab.run(exec_prefix + ["nc", "-z", "-w", "2", host, port])
+    lines.append(f"tcp: connect {host}:{port} {'OK' if rc == 0 else f'FAILED (rc={rc})'}")
+    return "\n".join(lines)
+
+
+def probe_connectivity(from_service: str, target: str) -> tuple[str, bool]:
+    try:
+        plan = validate_probe(from_service, target)
+        return truncate(_execute_probe(plan)), False
+    except Exception as exc:
+        return f"error: {exc}", True
+
 
 def validate_exec(command: str) -> dict:
     """Parse an exec_readonly command into an execution plan, or raise ValueError."""
@@ -168,6 +232,34 @@ TOOL_DEFINITIONS = [
         },
     },
     {
+        "name": "probe_connectivity",
+        "description": (
+            "Check DNS resolution and TCP connectivity from inside one "
+            "service's container to another lab service. Proves whether A can "
+            "actually reach B on the network, independent of application "
+            "code or logs."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "from_service": {
+                    "type": "string",
+                    "enum": PROBE_SOURCES,
+                    "description": "Container the probe runs inside.",
+                },
+                "target": {
+                    "type": "string",
+                    "description": (
+                        "Lab service to probe (postgres, redis, api, nginx), "
+                        "optionally with ':port'; defaults to the service's "
+                        "standard port."
+                    ),
+                },
+            },
+            "required": ["from_service", "target"],
+        },
+    },
+    {
         "name": "exec_readonly",
         "description": (
             "Run one read-only diagnostic command. Allowed forms: "
@@ -194,4 +286,8 @@ def dispatch(name: str, tool_input: dict) -> tuple[str, bool]:
         return get_logs(tool_input.get("service", ""), tool_input.get("lines", 100))
     if name == "exec_readonly":
         return exec_readonly(tool_input.get("command", ""))
+    if name == "probe_connectivity":
+        return probe_connectivity(
+            tool_input.get("from_service", ""), tool_input.get("target", "")
+        )
     return f"error: unknown tool {name!r}", True
