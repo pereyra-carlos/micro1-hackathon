@@ -87,6 +87,7 @@ the git history is the pre-registration evidence.
 | v0 | Initial agent, pre-registered eval | v1 (2 cases) | **6/6** | 4/6 | `results/20260828-172003/` |
 | v0 + psql-tool fix | Eval set v2: 6 cases (4 new), frozen | v2 (6 cases) | **15/18** | 12/18 | `results/20260828-205644/` |
 | v1 — **reverted** | Prompt rule: prefer verified state over traceback-inferred code | v2 (agent only; baseline frozen) | 14/18 | (12/18) | `results/20260829-v1-agent/` |
+| v2 | New tool: probe_connectivity (DNS + TCP from inside a container) | v2 (agent only; baseline frozen) | **18/18** | (12/18) | `results/20260829-025117/` |
 
 All runs: model `claude-sonnet-5`, N=3 per case per system. On v2 the agent
 sweeps every dump-unsolvable case (redis-oom, worker-oom, worker-wrong-queue:
@@ -105,6 +106,15 @@ second-guessing a correct state-based conclusion, and token spend rose. The
 rule was reverted; the traceback-over-trust failure likely needs a
 discriminating tool (e.g. a connectivity/DNS probe from inside the api
 container) rather than prompt exhortation.
+
+**v2 (kept):** the lesson from v1 applied — a discriminating tool instead of
+prompt exhortation, with the system prompt untouched. probe_connectivity runs
+DNS resolution and a TCP connect from inside a chosen service's container
+(allowlisted to lab services on both ends, shell-free). The agent went 18/18:
+every api-dns run performed the differential probe (api→postgres fails while
+worker→postgres succeeds) and cited it as evidence, and mean input tokens on
+api-dns halved vs v1 (227k → 99k) with redis-oom down 105k → 25k — proof
+beats argument on both accuracy and cost.
 
 `results/20260828-200028/` is an intermediate sweep kept for the record: it
 exposed that the original pg-connections design made the ground truth
@@ -196,9 +206,10 @@ separate planning/review session.
 
 ## Status
 
-Day 1 complete: lab, eval set v2 (6 cases, frozen), frozen baseline, agent
-v0, pre-registered harness, v2 baseline numbers (agent 15/18 vs baseline
-12/18), and one measured agent iteration (v1, negative result, reverted —
-see changelog). Next iteration ideas, in order: a connectivity/DNS probe
-tool to attack the api-dns failure mode with evidence instead of prompt
-rules; tightening the agent's token spend on cases it already solves.
+Lab, eval set v2 (6 cases, frozen), frozen baseline, pre-registered harness,
+and three measured agent iterations: v0 (15/18), v1 (prompt rule — negative
+result, reverted), v2 (probe_connectivity tool — 18/18, kept). The agent now
+beats the 12/18 baseline on every case family. Remaining headroom is cost
+and breadth, not accuracy: probe target allowlist could admit raw in-network
+IPs (the agent asked for one to split DNS from TCP), and a larger case set
+would restore discriminating power now that v2 saturates this one.
