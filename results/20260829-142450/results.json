@@ -1,0 +1,297 @@
+{
+  "meta": {
+    "model": "claude-sonnet-5",
+    "repetitions": 3,
+    "cases": [
+      "pg-lock"
+    ],
+    "systems": [
+      "baseline",
+      "agent"
+    ],
+    "started": "2026-08-29T14:24:50+00:00"
+  },
+  "rows": [
+    {
+      "system": "baseline",
+      "case": "pg-lock",
+      "model": "claude-sonnet-5",
+      "answer": {
+        "root_cause_component": "api",
+        "root_cause_type": "code_bug",
+        "explanation": "The first GET /orders call completes normally (200, 24ms) and the /jobs and /health endpoints continue to respond fast throughout the incident, ruling out a general API, network, postgres, or redis outage (postgres and redis logs show clean, healthy startup with no errors, and the worker successfully processed a queued job). However, the very next GET /orders call never produces a completion log line in the api service at all - it simply vanishes until nginx cuts it off with a 499 after the full 15s client timeout, and this pattern is confirmed by loadgen ('GET /orders 000 15.002406s'). Because only the /orders code path is affected while every other route (including /jobs, which also touches the DB/queue) stays fast, the most consistent explanation is a bug specific to the /orders handler - e.g. it fails to release its database connection/transaction back to the pool after the first successful call, so the pool's single connection (or the row/table lock it holds) is never freed. The next /orders request then blocks indefinitely waiting on that connection/lock, hanging until the client gives up, while unrelated endpoints that don't depend on the leaked resource continue to work normally.",
+        "evidence": [
+          {
+            "source": "nginx log",
+            "quote": "172.21.0.7 \"GET /orders HTTP/1.1\" 200 rt=0.030 urt=0.030"
+          },
+          {
+            "source": "nginx log",
+            "quote": "172.21.0.7 \"GET /orders HTTP/1.1\" 499 rt=15.001 urt=15.002"
+          },
+          {
+            "source": "api log",
+            "quote": "2026-08-29 14:25:07,253 INFO GET /orders -> 200 24ms"
+          },
+          {
+            "source": "loadgen log",
+            "quote": "GET /orders 000 15.002406s"
+          },
+          {
+            "source": "api log",
+            "quote": "2026-08-29 14:25:08,266 INFO POST /jobs -> 202 2ms"
+          },
+          {
+            "source": "postgres log",
+            "quote": "2026-08-29 14:25:00.133 UTC [1] LOG:  database system is ready to accept connections"
+          }
+        ],
+        "suggested_fix": "Audit the /orders handler for DB connection/transaction handling: ensure every code path (including early returns and exceptions) releases the connection back to the pool and commits/rolls back transactions; add explicit timeouts on DB acquisition and queries; consider using a context manager (e.g. `async with pool.acquire()`) instead of manual acquire/release, and increase pool size/observability (log pool checkout/checkin) to catch leaks in testing before production."
+      },
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 2561,
+        "input_tokens": 6174
+      },
+      "wall_seconds": 29.8,
+      "grade": {
+        "component_match": false,
+        "fault_match": false,
+        "correct": false
+      },
+      "repetition": 0
+    },
+    {
+      "system": "agent",
+      "case": "pg-lock",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-142609-f85c",
+      "answer": {
+        "root_cause_component": "postgres",
+        "root_cause_type": "other",
+        "explanation": "A psql session (pid 87) opened a transaction that runs `LOCK TABLE orders IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(3600)`, taking an exclusive lock on the `orders` table and then sleeping for an hour while holding it. Every subsequent query touching `orders` (the API's `SELECT id, item, status FROM orders ORDER BY id DESC LIMIT 10` used by GET /orders, and even a plain `SELECT count(*) FROM orders`) queues behind this lock and blocks indefinitely, which is exactly why GET /orders hangs past the 15s client timeout while POST /jobs (which never touches the orders table/lock, just pushes to redis) remains fast. This is not an API or connection-pool bug: pg_stat_activity shows the backend actively holding the ACCESS EXCLUSIVE lock and all /orders-related backends stuck in `Lock`/`relation` wait state behind it.",
+        "evidence": [
+          {
+            "source": "exec_readonly psql pg_stat_activity",
+            "quote": "87 | active | Timeout         | PgSleep    | BEGIN; LOCK TABLE orders IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(3600);                                                                               | 00:01:08.115956"
+          },
+          {
+            "source": "exec_readonly psql pg_stat_activity",
+            "quote": "88 | active | Lock            | relation   | SELECT id, item, status FROM orders ORDER BY id DESC LIMIT 10                                                                                           | 00:01:07.297619"
+          },
+          {
+            "source": "get_logs loadgen",
+            "quote": "GET /orders 000 15.002406s"
+          },
+          {
+            "source": "exec_readonly psql pid 87 detail",
+            "quote": "87 | app     | psql             |             | 2026-08-29 14:25:09.467257+00 | active | BEGIN; LOCK TABLE orders IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(3600);"
+          }
+        ],
+        "suggested_fix": "Terminate the offending backend (e.g. `SELECT pg_terminate_backend(87);`) to release the ACCESS EXCLUSIVE lock on `orders`, restoring normal query throughput. Then identify and eliminate the source of this manual/ad-hoc lock+sleep session (likely a stray maintenance script or debugging session left running against production), and consider adding a statement/lock timeout (e.g. `lock_timeout`, `statement_timeout`) on the app role to prevent a single session from blocking the table indefinitely in the future."
+      },
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 1656,
+        "input_tokens": 15187
+      },
+      "n_tool_calls": 5,
+      "wall_seconds": 23.6,
+      "trajectory": "trajectories/pg-lock/20260829-142609-f85c.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 0
+    },
+    {
+      "system": "baseline",
+      "case": "pg-lock",
+      "model": "claude-sonnet-5",
+      "answer": {
+        "root_cause_component": "worker",
+        "root_cause_type": "code_bug",
+        "explanation": "The first GET /orders succeeded quickly (24ms), but every subsequent GET /orders request from the api never returns and never even logs a completion line, hanging until nginx's 15s upstream timeout fires (499). Meanwhile POST /jobs and GET /health continue to respond instantly, showing the api process, nginx, redis and postgres connectivity are all otherwise healthy \u2014 this rules out generic resource exhaustion (CPU, connection pool for all queries) and points to a query-specific block. The worker log shows it picked up exactly one job (\"processed job 2e477deb974e in 2.0s\") and then goes silent for the rest of the incident window even though POST /jobs keeps enqueuing new jobs (202 responses continue). This pattern is consistent with the worker opening a transaction against the orders/reports tables for a job and never committing or rolling it back (e.g. an exception after acquiring a row/table lock, or a lock intentionally held while waiting on something that never completes). That open transaction holds a lock on the orders table in postgres, so the api's GET /orders query \u2014 which must read/lock the same rows \u2014 blocks indefinitely waiting for the lock, hangs past the nginx timeout, and the client sees a 000/timeout while nginx logs a 499. Because /jobs and /health don't touch the locked rows, they remain fast, exactly matching the reported symptom that only GET /orders is affected.",
+        "evidence": [
+          {
+            "source": "worker log",
+            "quote": "2026-08-29 14:27:13,921 INFO processed job 2e477deb974e in 2.0s"
+          },
+          {
+            "source": "nginx log",
+            "quote": "172.21.0.7 \"GET /orders HTTP/1.1\" 499 rt=15.001 urt=15.001"
+          },
+          {
+            "source": "api log",
+            "quote": "2026-08-29 14:27:10,877 INFO GET /orders -> 200 24ms"
+          },
+          {
+            "source": "api log",
+            "quote": "2026-08-29 14:27:12,451 INFO GET /health -> 200 13ms"
+          },
+          {
+            "source": "loadgen log",
+            "quote": "GET /orders 000 15.001989s"
+          },
+          {
+            "source": "loadgen log",
+            "quote": "POST /jobs 202 0.003168s"
+          }
+        ],
+        "suggested_fix": "Inspect the worker's job-processing code path for the report/orders write: ensure every DB transaction is wrapped so it always commits or rolls back (use try/finally or a context manager), and add a statement/lock timeout so a stuck transaction can't block reads indefinitely. As an immediate mitigation, check postgres `pg_stat_activity`/`pg_locks` for a long-running or idle-in-transaction session from the worker and terminate it, then restart the worker with the transaction-handling fix and add alerting on idle-in-transaction duration."
+      },
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 2282,
+        "input_tokens": 6173
+      },
+      "wall_seconds": 26.8,
+      "grade": {
+        "component_match": false,
+        "fault_match": false,
+        "correct": false
+      },
+      "repetition": 1
+    },
+    {
+      "system": "agent",
+      "case": "pg-lock",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-142809-24fe",
+      "answer": {
+        "root_cause_component": "postgres",
+        "root_cause_type": "resource_exhaustion",
+        "explanation": "A session (pid 87) executed `BEGIN; LOCK TABLE orders IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(3600);` and has held that exclusive lock for over a minute while sleeping for an hour. Every subsequent query against the orders table (the `SELECT id, item, status FROM orders ORDER BY id DESC LIMIT 10` issued by GET /orders, and even a `SELECT count(*) FROM orders`) queues up behind this lock and blocks indefinitely, waiting on wait_event_type=Lock. Since /orders is the only endpoint that touches the orders table, it hangs past the client's 15s timeout while /jobs and /health, which don't need that table/lock, continue to respond normally. The API and worker processes themselves are healthy; the root cause is entirely inside postgres due to an orphaned/stuck transaction holding a table-level exclusive lock.",
+        "evidence": [
+          {
+            "source": "exec_readonly psql pg_stat_activity",
+            "quote": "87 | active | Timeout | PgSleep | BEGIN; LOCK TABLE orders IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(3600); | 00:01:07.033099"
+          },
+          {
+            "source": "exec_readonly psql pg_stat_activity",
+            "quote": "88 | active | Lock | relation | SELECT id, item, status FROM orders ORDER BY id DESC LIMIT 10 | 00:01:06.209332"
+          },
+          {
+            "source": "exec_readonly psql pg_stat_activity",
+            "quote": "114 | active | Lock | relation | SELECT count(*) FROM orders | 00:00:50.200059"
+          }
+        ],
+        "suggested_fix": "Terminate the blocking backend (SELECT pg_kill/pg_terminate_backend(87)) to release the ACCESS EXCLUSIVE lock on orders, which will unblock the queued GET /orders queries. Then investigate/patch whatever job or maintenance script issued that LOCK TABLE ... pg_sleep(3600) statement (looks like a debug/test artifact or a runaway migration script) so it cannot run against production again; consider adding a statement_timeout/lock_timeout on the orders table's clients to prevent recurrence."
+      },
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 1514,
+        "input_tokens": 13860
+      },
+      "n_tool_calls": 5,
+      "wall_seconds": 21.5,
+      "trajectory": "trajectories/pg-lock/20260829-142809-24fe.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 1
+    },
+    {
+      "system": "baseline",
+      "case": "pg-lock",
+      "model": "claude-sonnet-5",
+      "answer": {
+        "root_cause_component": "worker",
+        "root_cause_type": "code_bug",
+        "explanation": "GET /orders queries the orders table and hangs indefinitely (nginx returns 499 after the 15s client timeout, and the API process never logs a completion for that request), while POST /jobs (which only enqueues to Redis) and GET /health continue to respond normally. The worker log shows it processed exactly one job (\"processed job 553a7bec8c47 in 2.0s\") right after startup and then goes completely silent even though the API/nginx logs show additional POST /jobs 202 responses being enqueued afterward - meaning the worker never picked up or finished processing subsequent jobs. This points to the worker getting stuck mid-transaction while writing a report row after that first job (e.g., a missing commit/rollback, an unhandled exception inside a `BEGIN`, or a long-held row/table lock on the orders table). Because Postgres itself is healthy and accepting connections, the most consistent explanation for \"only /orders hangs, DB is otherwise reachable, and the worker stalls after one job\" is that the worker is holding an open transaction/lock against the orders table that the GET /orders SELECT is blocked waiting on, which will only release when the client (or nginx) gives up.",
+        "evidence": [
+          {
+            "source": "nginx logs",
+            "quote": "172.21.0.7 \"GET /orders HTTP/1.1\" 499 rt=15.002 urt=15.002"
+          },
+          {
+            "source": "nginx logs",
+            "quote": "172.21.0.7 \"POST /jobs HTTP/1.1\" 202 rt=0.003 urt=0.003"
+          },
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:29:10,143 INFO GET /orders -> 200 25ms"
+          },
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:29:11,157 INFO POST /jobs -> 202 2ms"
+          },
+          {
+            "source": "worker logs",
+            "quote": "2026-08-29 14:29:13,183 INFO processed job 553a7bec8c47 in 2.0s"
+          },
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:29:29,180 INFO POST /jobs -> 202 1ms"
+          },
+          {
+            "source": "loadgen logs",
+            "quote": "GET /orders 000 15.002669s"
+          }
+        ],
+        "suggested_fix": "Inspect the worker's job-processing code path for a transaction that is opened but not reliably committed/rolled back (especially around writing report rows tied to orders), and check pg_stat_activity / pg_locks in postgres for a long-running/idle-in-transaction session from the worker holding a lock on the orders table. Add explicit try/finally (or context-managed) transaction handling with a statement/lock timeout in the worker, restart the worker service to release the stuck transaction, and add alerting on 'idle in transaction' sessions and worker heartbeat/job-processing lag to catch this earlier."
+      },
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 2362,
+        "input_tokens": 6175
+      },
+      "wall_seconds": 26.7,
+      "grade": {
+        "component_match": false,
+        "fault_match": false,
+        "correct": false
+      },
+      "repetition": 2
+    },
+    {
+      "system": "agent",
+      "case": "pg-lock",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-143009-e056",
+      "answer": {
+        "root_cause_component": "postgres",
+        "root_cause_type": "other",
+        "explanation": "A stray/rogue session (pid 87) executed `BEGIN; LOCK TABLE orders IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(3600);` and has been holding that exclusive lock on the orders table for over a minute. Every GET /orders request issues `SELECT id, item, status FROM orders ORDER BY id DESC LIMIT 10`, which must wait for a compatible lock and is now queued behind the ACCESS EXCLUSIVE lock, causing requests to hang indefinitely (well past the 15s client timeout) while the connection pool fills with blocked backends. POST /jobs and other endpoints are unaffected because they don't touch the orders table (they only push to the redis queue), so the outage is isolated to /orders as observed. This is not an API or worker code bug, nor a resource-exhaustion issue on the DB host \u2014 it's a long-held table lock from an errant/stuck transaction blocking all readers of that table.",
+        "evidence": [
+          {
+            "source": "exec_readonly psql pg_stat_activity",
+            "quote": "87 | active | Timeout | PgSleep | BEGIN; LOCK TABLE orders IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(3600); | 00:01:06.333277"
+          },
+          {
+            "source": "exec_readonly psql pg_stat_activity",
+            "quote": "88 | active | Lock | relation | SELECT id, item, status FROM orders ORDER BY id DESC LIMIT 10 | 00:01:05.508757"
+          },
+          {
+            "source": "get_logs api",
+            "quote": "2026-08-29 14:29:10,143 INFO GET /orders -> 200 25ms"
+          }
+        ],
+        "suggested_fix": "Identify and terminate the offending backend (e.g. `SELECT pg_terminate_backend(87);`) to release the ACCESS EXCLUSIVE lock on `orders`; audit for the source of that LOCK TABLE/pg_sleep statement (likely a debug/maintenance script or a runaway migration) and prevent it from running against production; add a statement_timeout/lock_timeout on the API's DB role and alerting on long-held locks to catch this earlier."
+      },
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 1517,
+        "input_tokens": 12208
+      },
+      "n_tool_calls": 4,
+      "wall_seconds": 20.8,
+      "trajectory": "trajectories/pg-lock/20260829-143009-e056.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 2
+    }
+  ]
+}

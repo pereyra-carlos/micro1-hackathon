@@ -1,0 +1,308 @@
+{
+  "meta": {
+    "model": "claude-sonnet-5",
+    "repetitions": 3,
+    "cases": [
+      "redis-auth"
+    ],
+    "systems": [
+      "baseline",
+      "agent"
+    ],
+    "started": "2026-08-29T14:17:48+00:00"
+  },
+  "rows": [
+    {
+      "system": "baseline",
+      "case": "redis-auth",
+      "model": "claude-sonnet-5",
+      "answer": {
+        "root_cause_component": "redis",
+        "root_cause_type": "misconfiguration",
+        "explanation": "The API's POST /jobs handler enqueues each job onto Redis before returning; normally this is fast (2\u20114 ms, HTTP 202). Starting mid\u2011incident, every POST /jobs call instead takes ~2.03s and returns 200, exactly matching the retry/timeout window seen in the worker logs. The worker's Redis client is repeatedly failing to connect with `redis.exceptions.AuthenticationError: Authentication required` (NOAUTH), meaning Redis is now enforcing authentication that the worker (and presumably the API's redis client, sharing the same instance/credentials) is not providing. Because Redis rejects the connection, the worker can never pull jobs from the queue, and the API's own path to Redis is also blocked/retried, which manifests as the API blocking for ~2s per POST /jobs (a client-side connection/auth retry timeout) before ultimately falling through and returning 200 with the queue write likely bypassed or degraded. This produces the observed p95 latency spike on POST /jobs while error rate stays \"normal\" (calls still return 200, just slow), and explains the API health check intermittently returning 503 (its own health probe likely checks Redis connectivity too). Postgres and nginx are healthy and uninvolved; the fault chain originates at Redis's authentication requirement not being satisfied by its clients.",
+        "evidence": [
+          {
+            "source": "worker logs",
+            "quote": "redis.exceptions.AuthenticationError: Authentication required."
+          },
+          {
+            "source": "worker logs",
+            "quote": "2026-08-29 14:18:07,691 ERROR job processing failed, retrying in 5s"
+          },
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:18:05,660 INFO POST /jobs -> 202 2ms"
+          },
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:18:10,730 INFO POST /jobs -> 200 2031ms"
+          },
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:18:11,399 INFO GET /health -> 503 14ms"
+          },
+          {
+            "source": "nginx logs",
+            "quote": "172.21.0.7 \"POST /jobs HTTP/1.1\" 200 rt=2.033 urt=2.033"
+          },
+          {
+            "source": "docker compose ps",
+            "quote": "incident-lab-api-1 ... Up 36 seconds (unhealthy)"
+          }
+        ],
+        "suggested_fix": "Verify Redis auth configuration: check whether `requirepass`/ACL was enabled on the redis service (env var, config file, or CONFIG SET) without updating the API and worker connection strings/env vars (e.g., REDIS_PASSWORD) to match. Align credentials across api, worker, and redis (or disable requirepass if auth wasn't intended for this lab), restart worker and api, and confirm POST /jobs returns to ~2-5ms with the worker successfully draining the queue (no more AuthenticationError in worker logs) and /health returning 200 consistently."
+      },
+      "usage": {
+        "output_tokens": 4057,
+        "input_tokens": 11589,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0
+      },
+      "wall_seconds": 46.5,
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 0
+    },
+    {
+      "system": "agent",
+      "case": "redis-auth",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-141923-c34d",
+      "answer": {
+        "root_cause_component": "redis",
+        "root_cause_type": "misconfiguration",
+        "explanation": "Redis has `requirepass` enabled, but both api and worker are configured with `REDIS_URL=redis://redis:6379/0` (no password). The worker fails every connection attempt with `AuthenticationError: Authentication required.` and can never BLPOP jobs, so the queue backs up. The api, on POST /jobs, also cannot authenticate to Redis to enqueue the job; it appears to retry/timeout against Redis for ~2s before falling back and returning 200, which is exactly the elevated p95 latency (2015-2033ms) seen in the alert. GET /health independently reports `queue: unreachable` confirming Redis connectivity is broken, and GET /orders (no Redis dependency) stays fast, isolating the fault to the Redis link rather than api/postgres/network capacity.",
+        "evidence": [
+          {
+            "source": "get_logs(worker)",
+            "quote": "redis.exceptions.AuthenticationError: Authentication required."
+          },
+          {
+            "source": "get_logs(api)",
+            "quote": "2026-08-29 14:18:10,730 INFO POST /jobs -> 200 2031ms"
+          },
+          {
+            "source": "get_status",
+            "quote": "GET /health -> 503 {\"db\":\"ok\",\"queue\":\"unreachable\"}"
+          },
+          {
+            "source": "exec_readonly(redis-cli config get requirepass)",
+            "quote": "NOAUTH Authentication required."
+          },
+          {
+            "source": "docker inspect worker",
+            "quote": "\"REDIS_URL=redis://redis:6379/0\""
+          }
+        ],
+        "suggested_fix": "Set the correct Redis password in the api and worker REDIS_URL (or via a REDIS_PASSWORD env var) to match Redis's requirepass, e.g. REDIS_URL=redis://:<password>@redis:6379/0, then restart api and worker so the queue can be reached again and the backlog drains."
+      },
+      "usage": {
+        "cache_read_input_tokens": 0,
+        "input_tokens": 29368,
+        "output_tokens": 1596,
+        "cache_creation_input_tokens": 0
+      },
+      "n_tool_calls": 6,
+      "wall_seconds": 21.9,
+      "trajectory": "trajectories/redis-auth/20260829-141923-c34d.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 0
+    },
+    {
+      "system": "baseline",
+      "case": "redis-auth",
+      "model": "claude-sonnet-5",
+      "answer": {
+        "root_cause_component": "redis",
+        "root_cause_type": "misconfiguration",
+        "explanation": "The API's POST /jobs handler enqueues a job in Redis and then waits (with a ~2s timeout) for the worker to signal completion before responding. The worker successfully processed the very first job, but its Redis connection was then dropped (\"Connection closed by server\") and every subsequent reconnect attempt fails with \"redis.exceptions.AuthenticationError: Authentication required.\" (NOAUTH), meaning Redis is now enforcing authentication that the worker's client isn't configured to satisfy. Because the worker can no longer BLPOP from the queue, no job ever completes, so every API request that enqueues a job blocks for the full internal timeout (~2.03s) before falling back and returning 200 instead of the fast 202 seen on the first request. This exactly matches the nginx/api/loadgen logs, where latency jumps from ~2-4ms to a consistent ~2.03s immediately after the first successful job, with error rate staying \"normal\" because the API still returns 200/202 (just slow) rather than failing outright. Postgres and nginx show no issues, and the API/nginx processes themselves are healthy, confirming the root cause is upstream in the Redis/worker path rather than in the API code or infra directly serving HTTP.",
+        "evidence": [
+          {
+            "source": "worker logs",
+            "quote": "redis.exceptions.ConnectionError: Connection closed by server."
+          },
+          {
+            "source": "worker logs",
+            "quote": "redis.exceptions.AuthenticationError: Authentication required."
+          },
+          {
+            "source": "worker logs",
+            "quote": "2026-08-29 14:20:17,902 INFO processed job 1e6b89ea60b2 in 2.0s\nworker-1  | 2026-08-29 14:20:17,904 ERROR job processing failed, retrying in 5s"
+          },
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:20:15,868 INFO POST /jobs -> 202 2ms"
+          },
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:20:20,938 INFO POST /jobs -> 200 2031ms"
+          },
+          {
+            "source": "nginx logs",
+            "quote": "172.21.0.7 \"POST /jobs HTTP/1.1\" 202 rt=0.004 urt=0.004"
+          },
+          {
+            "source": "nginx logs",
+            "quote": "172.21.0.7 \"POST /jobs HTTP/1.1\" 200 rt=2.032 urt=2.033"
+          },
+          {
+            "source": "loadgen logs",
+            "quote": "POST /jobs 200 2.033908s"
+          }
+        ],
+        "suggested_fix": "Reconcile Redis authentication: verify whether requirepass/ACL was enabled on the redis-1 instance (e.g., via an image/config change or restart) and either disable auth for this lab environment or supply the correct REDIS_PASSWORD/ACL credentials to the worker's Redis client so it can reconnect and resume BLPOP on the job queue. After restoring worker connectivity, confirm the API's synchronous job-wait path returns to sub-100ms latency, and consider adding alerting/retries with backoff plus a circuit breaker in the API when the worker/queue path is unhealthy so latency degrades gracefully instead of pinning at the timeout value."
+      },
+      "usage": {
+        "output_tokens": 4463,
+        "input_tokens": 11591,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0
+      },
+      "wall_seconds": 51.3,
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 1
+    },
+    {
+      "system": "agent",
+      "case": "redis-auth",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-142138-b143",
+      "answer": {
+        "root_cause_component": "redis",
+        "root_cause_type": "misconfiguration",
+        "explanation": "Redis is running with authentication required (requirepass set), but both the api and worker containers are configured with REDIS_URL=redis://redis:6379/0 (no password). Every redis command from api/worker therefore fails with AuthenticationError. The worker's blpop loop can never authenticate, so it never drains the jobs queue (health check correctly reports queue:\"unreachable\"). The api's POST /jobs handler, on failing to enqueue to redis, falls back to a slow synchronous path (or retries) that takes ~2s per request before returning 200 instead of the normal fast 202 enqueue response \u2014 this is exactly the p95 latency spike seen on POST /jobs. GET /orders and GET /health (db check) stay fast because they don't depend on redis for their main logic, confirming the fault is isolated to the redis dependency rather than api/db capacity.",
+        "evidence": [
+          {
+            "source": "exec_readonly redis-cli info clients",
+            "quote": "NOAUTH Authentication required."
+          },
+          {
+            "source": "get_logs worker",
+            "quote": "redis.exceptions.AuthenticationError: Authentication required.\n2026-08-29 14:21:47,947 ERROR job processing failed, retrying in 5s"
+          },
+          {
+            "source": "get_logs api",
+            "quote": "2026-08-29 14:20:15,868 INFO POST /jobs -> 202 2ms\n... 2026-08-29 14:20:20,938 INFO POST /jobs -> 200 2031ms"
+          },
+          {
+            "source": "get_status",
+            "quote": "GET /health -> 503 {\"db\":\"ok\",\"queue\":\"unreachable\"}"
+          },
+          {
+            "source": "docker inspect api",
+            "quote": "\"REDIS_URL=redis://redis:6379/0\""
+          },
+          {
+            "source": "docker inspect worker",
+            "quote": "\"REDIS_URL=redis://redis:6379/0\""
+          },
+          {
+            "source": "exec_readonly redis-cli config get requirepass",
+            "quote": "NOAUTH Authentication required."
+          }
+        ],
+        "suggested_fix": "Align redis credentials across services: either disable requirepass on the redis container (if auth wasn't intended in this env) or set REDIS_PASSWORD/REDIS_URL with the correct password (redis://:<password>@redis:6379/0) for both api and worker, then restart api and worker so they can authenticate, drain the backlog, and restore fast enqueue (202) responses. Also fix the redis healthcheck (currently 'redis-cli ping' returns exit 0 even on NOAUTH error) so it fails when auth is misconfigured, e.g. use 'redis-cli -a $REDIS_PASSWORD ping' and grep for PONG."
+      },
+      "usage": {
+        "cache_read_input_tokens": 0,
+        "input_tokens": 56082,
+        "output_tokens": 3792,
+        "cache_creation_input_tokens": 0
+      },
+      "n_tool_calls": 10,
+      "wall_seconds": 48.5,
+      "trajectory": "trajectories/redis-auth/20260829-142138-b143.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 1
+    },
+    {
+      "system": "baseline",
+      "case": "redis-auth",
+      "model": "claude-sonnet-5",
+      "answer": {
+        "root_cause_component": "worker",
+        "root_cause_type": "misconfiguration",
+        "explanation": "The nginx/api/loadgen logs show POST /jobs going from a fast 202 (queued) to a consistent ~2.03s 200 response, which is the signature of the API blocking/polling for a job to reach completion before responding, up to a fixed ~2s timeout. The worker logs reveal the actual failure: after successfully processing one job, every subsequent redis connection attempt from the worker fails with `redis.exceptions.AuthenticationError: Authentication required.` This means the worker's redis client is not sending (or is sending wrong) credentials required by the redis server's auth configuration, so the worker can no longer pull jobs off the queue (`BLPOP`) or complete them. With jobs stuck unprocessed in redis, the API's synchronous wait-for-completion logic on POST /jobs times out at ~2s for every request, producing the observed p95 latency spike \u2014 while error rates stay normal because the API still eventually returns 200 after the timeout rather than failing outright. Postgres and redis themselves are healthy and responsive; the bottleneck is purely the broken worker\u2192redis authentication path stalling job completion.",
+        "evidence": [
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:23:01,905 INFO POST /jobs -> 200 2025ms"
+          },
+          {
+            "source": "nginx logs",
+            "quote": "172.21.0.7 \"POST /jobs HTTP/1.1\" 200 rt=2.027 urt=2.026"
+          },
+          {
+            "source": "worker logs",
+            "quote": "redis.exceptions.AuthenticationError: Authentication required."
+          },
+          {
+            "source": "worker logs",
+            "quote": "2026-08-29 14:22:58,875 ERROR job processing failed, retrying in 5s"
+          },
+          {
+            "source": "worker logs",
+            "quote": "2026-08-29 14:22:58,874 INFO processed job 9511684dc42c in 2.0s"
+          }
+        ],
+        "suggested_fix": "Verify and align redis authentication credentials between the worker and redis services (e.g., check REDIS_PASSWORD/REDIS_URL env vars used by worker vs. the requirepass/ACL configured on the redis container), redeploy the worker with correct credentials, and confirm it can again BLPOP from the queue and drain the backlog; also consider adding a circuit breaker/shorter timeout in the API's job-wait logic so a stalled worker degrades gracefully instead of adding fixed 2s latency to every POST /jobs request."
+      },
+      "usage": {
+        "output_tokens": 2626,
+        "input_tokens": 11587,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0
+      },
+      "wall_seconds": 29.8,
+      "grade": {
+        "component_match": false,
+        "fault_match": true,
+        "correct": false
+      },
+      "repetition": 2
+    },
+    {
+      "system": "agent",
+      "case": "redis-auth",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-142357-5549",
+      "answer": {
+        "root_cause_component": "redis",
+        "root_cause_type": "misconfiguration",
+        "explanation": "Redis now requires authentication (requirepass is set), but the api and worker containers are configured with REDIS_URL=redis://redis:6379/0 \u2014 no password. Every command the api/worker send to Redis (LPUSH for enqueue, BLPOP for dequeue) is rejected with 'NOAUTH Authentication required.' The api's /jobs handler retries/waits on the failing Redis call before giving up, which is why POST /jobs consistently takes ~2.0s (a retry/timeout ceiling) instead of the normal <100ms, even though it still eventually returns 200/202 having failed to actually enqueue the job. The worker can never successfully BLPOP either, so jobs are not processed (queue backs up), and /health reports 'queue: unreachable' confirming Redis connectivity is broken at the auth layer, not the network layer (TCP connect to redis:6379 succeeds fine per probe_connectivity). Postgres is unaffected, so error rate stays normal while latency balloons only on the Redis-dependent path.</explanation>\n<parameter name=\"evidence\">[{\"source\":\"exec_readonly redis-cli info memory\",\"quote\":\"NOAUTH Authentication required.\"},{\"source\":\"exec_readonly redis-cli config get requirepass\",\"quote\":\"NOAUTH Authentication required.\"},{\"source\":\"get_logs worker\",\"quote\":\"redis.exceptions.AuthenticationError: Authentication required.\\nworker-1  | 2026-08-29 14:24:23,918 ERROR job processing failed, retrying in 5s\"},{\"source\":\"get_status\",\"quote\":\"GET /health -> 503 {\\\"db\\\":\\\"ok\\\",\\\"queue\\\":\\\"unreachable\\\"}\"},{\"source\":\"get_logs api\",\"quote\":\"2026-08-29 14:23:01,905 INFO POST /jobs -> 200 2025ms\"},{\"source\":\"docker inspect api\",\"quote\":\"\\\"REDIS_URL=redis://redis:6379/0\\\"\"},{\"source\":\"probe_connectivity api->redis\",\"quote\":\"tcp: connect 172.21.0.2:6379 OK\"}]",
+        "evidence": [],
+        "suggested_fix": "Align Redis auth configuration: either supply the correct password to the api and worker via REDIS_URL (e.g. redis://:<password>@redis:6379/0) matching Redis's requirepass, or if the auth requirement was introduced unintentionally (e.g. via a mounted redis.conf or manual CONFIG SET that persisted), remove/disable requirepass on the Redis service to restore the previous no-auth trust boundary. After the fix, verify the worker can BLPOP without AuthenticationError and /health reports queue: ok."
+      },
+      "usage": {
+        "cache_read_input_tokens": 0,
+        "input_tokens": 46706,
+        "output_tokens": 2903,
+        "cache_creation_input_tokens": 0
+      },
+      "n_tool_calls": 9,
+      "wall_seconds": 39.4,
+      "trajectory": "trajectories/redis-auth/20260829-142357-5549.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 2
+    }
+  ]
+}

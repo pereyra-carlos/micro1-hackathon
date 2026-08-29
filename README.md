@@ -102,6 +102,7 @@ the git history is the pre-registration evidence.
 | v0 + psql-tool fix | Eval set v2: 6 cases (4 new), frozen | v2 (6 cases) | **15/18** | 12/18 | `results/20260828-205644/` |
 | v1 — **reverted** | Prompt rule: prefer verified state over traceback-inferred code | v2 (agent only; baseline frozen) | 14/18 | (12/18) | `results/20260829-v1-agent/` |
 | v2 | New tool: probe_connectivity (DNS + TCP from inside a container) | v2 (agent only; baseline frozen) | **18/18** | (12/18) | `results/20260829-025117/` |
+| v2 + tool fixes | Eval set v3: 4 probe-blind cases (10 total) | v3 additions, both systems | **12/12** new · **30/30** overall | 5/12 new · 17/30 overall | `results/20260829-v3-newcases/` |
 
 All runs: model `claude-sonnet-5`, N=3 per case per system.
 
@@ -138,6 +139,20 @@ worker→postgres succeeds) and cited it as evidence
 ([example](trajectories/api-dns/20260829-030825-7f79.md)), and mean input tokens on
 api-dns halved vs v1 (227k → 99k) with redis-oom down 105k → 25k — proof
 beats argument on both accuracy and cost.
+
+**Eval set v3 (both systems on the four new cases):** the probe-blind
+design worked against the baseline but not against the agent. The baseline
+went 5/12 — 0/3 on both dump-silent cases, defaulting to `code_bug` when no
+log names a cause (e.g. pg-lock, where it blamed api or worker code) — while
+the agent went 12/12, e.g. finding the blocking `LOCK TABLE` transaction via
+`pg_stat_activity` in ~22s
+([trajectory](trajectories/pg-lock/20260829-142609-f85c.md)). Two tool-layer
+fixes landed with the pre-registration (raw SQL literals, full-size docker
+inspect) plus a lab-realism fix (readonly gets `pg_monitor`); the agent
+prompt is unchanged since v0. Honest caveat: v3 widened the agent-vs-baseline
+gap (its actual purpose) but did **not** restore headroom over the current
+agent, which saturates 30/30 — harder case families (flapping faults,
+multi-fault incidents, red-herring changes) remain future work.
 
 `results/20260828-200028/` is an intermediate sweep kept for the record: it
 exposed that the original pg-connections design made the ground truth
@@ -236,10 +251,13 @@ separate planning/review session.
 
 Lab, eval set v2 (6 cases, frozen), frozen baseline, pre-registered harness,
 and three measured agent iterations: v0 (15/18), v1 (prompt rule — negative
-result, reverted), v2 (probe_connectivity tool — 18/18, kept). The agent now
-beats the 12/18 baseline on every case family. Trajectories ship with
-readable renderings and REPRODUCING.md documents the exact commands, costs
-and runtimes. Next: **eval set v3** — a larger case set to restore
-discriminating power now that v2 saturates this one; secondary ideas are
-admitting raw in-network IPs as probe targets (the agent asked for one to
-split DNS from TCP) and trimming token spend on already-solved cases.
+result, reverted), v2 (probe_connectivity tool — 18/18, kept). The agent
+now stands at **30/30 across eval set v3** (10 cases) against the frozen
+baseline's 17/30, with the gap concentrated exactly where investigation is
+required: across the five dump-unsolvable cases the baseline goes 5/15; the
+agent goes 15/15.
+Trajectories ship with readable renderings and REPRODUCING.md documents the
+exact commands, costs and runtimes. Future work: case families that could
+challenge the current agent (flapping faults, multi-fault incidents,
+red-herring recent changes), raw in-network IPs as probe targets, and
+trimming token spend on already-solved cases.

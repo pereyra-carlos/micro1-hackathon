@@ -1,0 +1,297 @@
+{
+  "meta": {
+    "model": "claude-sonnet-5",
+    "repetitions": 3,
+    "cases": [
+      "nginx-bad-upstream"
+    ],
+    "systems": [
+      "baseline",
+      "agent"
+    ],
+    "started": "2026-08-29T14:13:06+00:00"
+  },
+  "rows": [
+    {
+      "system": "baseline",
+      "case": "nginx-bad-upstream",
+      "model": "claude-sonnet-5",
+      "answer": {
+        "root_cause_component": "nginx",
+        "root_cause_type": "misconfiguration",
+        "explanation": "The API service is healthy and serving requests locally (uvicorn is bound to 0.0.0.0:8000 and its own /health checks return 200 consistently), so the backend itself is not down. However, nginx's proxy_pass/upstream configuration points to port 8001 on the api container (172.21.0.5:8001), which nothing is listening on, causing every proxied request to fail with 'Connection refused' and be translated into a 502 by nginx. This exactly matches the observed 502 flood on /orders and /jobs while nginx's own health endpoint (routed locally, not proxied) keeps returning 200, and while the api container's internal logs show it is up and processing its own /health checks fine (those are likely from a docker healthcheck hitting port 8000 directly, not via nginx). This is a classic port-mismatch misconfiguration between the reverse proxy and the upstream service.",
+        "evidence": [
+          {
+            "source": "nginx logs",
+            "quote": "2026/08/29 14:13:29 [error] 30#30: *1 connect() failed (111: Connection refused) while connecting to upstream, client: 172.21.0.7, server: , request: \"GET /orders HTTP/1.1\", upstream: \"http://172.21.0.5:8001/orders\", host: \"nginx\""
+          },
+          {
+            "source": "api logs",
+            "quote": "INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)"
+          },
+          {
+            "source": "nginx logs",
+            "quote": "127.0.0.1 \"GET /nginx-health HTTP/1.1\" 200 rt=0.000 urt=-"
+          },
+          {
+            "source": "loadgen logs",
+            "quote": "GET /orders 502 2.502771s"
+          }
+        ],
+        "suggested_fix": "Update the nginx upstream/proxy_pass configuration (default.conf or the templated conf) to point to the correct api port, 8000, instead of 8001, then reload/restart nginx. Also add a startup-time config validation or integration test that verifies nginx's upstream port matches the api container's actual listening port to prevent recurrence."
+      },
+      "usage": {
+        "input_tokens": 8741,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 1242,
+        "cache_creation_input_tokens": 0
+      },
+      "wall_seconds": 14.5,
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 0
+    },
+    {
+      "system": "agent",
+      "case": "nginx-bad-upstream",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-141407-9a7d",
+      "answer": {
+        "root_cause_component": "nginx",
+        "root_cause_type": "misconfiguration",
+        "explanation": "nginx's upstream/proxy_pass configuration points to the api service on port 8001, but the api container actually runs uvicorn bound to port 8000 (confirmed via docker inspect Cmd and the startup log 'Uvicorn running on http://0.0.0.0:8000'). Because nothing listens on 8001 inside the api container, every request nginx proxies (all routes, including /health) gets 'Connection refused' from the kernel and nginx returns 502 to the client. This matches the alert: 502s on all routes at ~100% while the api process itself is healthy and serving 200s directly on port 8000 (visible in api logs and confirmed by probe_connectivity showing api:8000 reachable but api:8001 refused). The api, worker, postgres, and redis are otherwise fully healthy, so the fault is isolated to nginx's upstream port misconfiguration, not a downstream outage.",
+        "evidence": [
+          {
+            "source": "get_logs(nginx)",
+            "quote": "connect() failed (111: Connection refused) while connecting to upstream, client: 172.21.0.7, server: , request: \"GET /orders HTTP/1.1\", upstream: \"http://172.21.0.5:8001/orders\", host: \"nginx\""
+          },
+          {
+            "source": "get_logs(api)",
+            "quote": "INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)"
+          },
+          {
+            "source": "exec_readonly(docker inspect api)",
+            "quote": "\"Cmd\": [\"uvicorn\",\"api:app\",\"--host\",\"0.0.0.0\",\"--port\",\"8000\",\"--no-access-log\"]"
+          },
+          {
+            "source": "probe_connectivity(nginx->api:8001)",
+            "quote": "tcp: connect api:8001 FAILED (rc=1)"
+          },
+          {
+            "source": "probe_connectivity(nginx->api:8000)",
+            "quote": "tcp: connect api:8000 OK"
+          }
+        ],
+        "suggested_fix": "Update nginx's upstream/proxy_pass definition (nginx.conf / default.conf) to target api:8000 instead of api:8001, then reload/restart nginx. Optionally add a startup config validation or explicit port env var shared between the api service and nginx template to prevent this drift in future."
+      },
+      "usage": {
+        "output_tokens": 1506,
+        "input_tokens": 24177,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0
+      },
+      "n_tool_calls": 6,
+      "wall_seconds": 19.2,
+      "trajectory": "trajectories/nginx-bad-upstream/20260829-141407-9a7d.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 0
+    },
+    {
+      "system": "baseline",
+      "case": "nginx-bad-upstream",
+      "model": "claude-sonnet-5",
+      "answer": {
+        "root_cause_component": "nginx",
+        "root_cause_type": "misconfiguration",
+        "explanation": "All /orders and /jobs requests through the edge return 502 because nginx cannot even open a TCP connection to the upstream app (ECONNREFUSED), not because the app is failing. The nginx error log shows it is trying to reach the API at 172.21.0.4:8001, while the api container's own logs show uvicorn is listening on port 8000 (\"Uvicorn running on http://0.0.0.0:8000\"). Since nothing is listening on 8001, every proxied request is refused immediately (rt=0.000/0.001s), producing the 502 storm seen by loadgen and the alert, while direct health checks to the correct port (used by the docker healthcheck) succeed and keep the api container marked healthy. Postgres, redis, and worker are all healthy and unrelated to the failure. The mismatch between the nginx upstream port (8001) and the api's actual listening port (8000) is a configuration error in the nginx upstream/proxy_pass definition (or an unsynced env var), not an api crash or resource issue.",
+        "evidence": [
+          {
+            "source": "nginx logs",
+            "quote": "connect() failed (111: Connection refused) while connecting to upstream, client: 172.21.0.7, server: , request: \"GET /orders HTTP/1.1\", upstream: \"http://172.21.0.4:8001/orders\", host: \"nginx\""
+          },
+          {
+            "source": "api logs",
+            "quote": "INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)"
+          },
+          {
+            "source": "nginx logs",
+            "quote": "172.21.0.7 \"GET /orders HTTP/1.1\" 502 rt=0.000 urt=0.000"
+          },
+          {
+            "source": "loadgen logs",
+            "quote": "GET /orders 502 0.001050s"
+          }
+        ],
+        "suggested_fix": "Align the nginx upstream/proxy_pass configuration with the api's actual listening port (change upstream target from 8001 to 8000, or set the api to listen on 8001 consistently), then reload nginx and confirm docker-compose service env vars for the api port match across both configs; add a startup check that fails fast if the configured upstream port doesn't match the app's bound port."
+      },
+      "usage": {
+        "input_tokens": 8741,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 1440,
+        "cache_creation_input_tokens": 0
+      },
+      "wall_seconds": 16.1,
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 1
+    },
+    {
+      "system": "agent",
+      "case": "nginx-bad-upstream",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-141540-a52c",
+      "answer": {
+        "root_cause_component": "nginx",
+        "root_cause_type": "misconfiguration",
+        "explanation": "nginx is loaded with a bind-mounted config file literally named nginx-broken.conf, whose upstream/proxy_pass directive points at port 8001 on the api container. The api process, however, is started via uvicorn on port 8000 (confirmed by the Cmd/Args and startup log 'Uvicorn running on http://0.0.0.0:8000'), and no process is listening on 8001. Every request nginx forwards therefore gets 'Connection refused' from the api container's IP:8001, which nginx turns into a 502 to the client. The api and its dependencies (postgres/redis) are healthy and serving requests internally on 8000 (visible in api's own access log with 200/202 statuses), proving the fault is purely in nginx's upstream port configuration, not in the api/db/queue layer.",
+        "evidence": [
+          {
+            "source": "get_logs(nginx)",
+            "quote": "connect() failed (111: Connection refused) while connecting to upstream, client: 172.21.0.7, server: , request: \"GET /orders HTTP/1.1\", upstream: \"http://172.21.0.4:8001/orders\", host: \"nginx\""
+          },
+          {
+            "source": "exec_readonly(docker inspect api)",
+            "quote": "\"Cmd\": [\"uvicorn\",\"api:app\",\"--host\",\"0.0.0.0\",\"--port\",\"8000\",\"--no-access-log\"]"
+          },
+          {
+            "source": "get_logs(api)",
+            "quote": "INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)"
+          },
+          {
+            "source": "exec_readonly(docker inspect api)",
+            "quote": "\"IPAddress\": \"172.21.0.4\""
+          },
+          {
+            "source": "exec_readonly(docker inspect nginx)",
+            "quote": "\"Source\": \"/home/carlos/Trabajo/hackathon-micro1/lab/nginx/nginx-broken.conf\", \"Destination\": \"/etc/nginx/nginx.conf\""
+          },
+          {
+            "source": "get_logs(api)",
+            "quote": "2026-08-29 14:15:44,273 INFO GET /health -> 200 14ms"
+          }
+        ],
+        "suggested_fix": "Update/replace the nginx config (currently mounted from nginx-broken.conf) so the proxy_pass/upstream for the api service targets port 8000 (matching the uvicorn --port 8000 the api container actually listens on), or revert to the known-good nginx.conf. Reload/restart nginx after fixing, then verify GET /health through the edge returns 200."
+      },
+      "usage": {
+        "output_tokens": 1785,
+        "input_tokens": 29812,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0
+      },
+      "n_tool_calls": 5,
+      "wall_seconds": 23.3,
+      "trajectory": "trajectories/nginx-bad-upstream/20260829-141540-a52c.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 1
+    },
+    {
+      "system": "baseline",
+      "case": "nginx-bad-upstream",
+      "model": "claude-sonnet-5",
+      "answer": {
+        "root_cause_component": "nginx",
+        "root_cause_type": "misconfiguration",
+        "explanation": "Nginx is configured to proxy to the api upstream on port 8001 (`http://172.21.0.5:8001/...`), but the api container's uvicorn process is actually listening on port 8000 (`Uvicorn running on http://0.0.0.0:8000`). Because nothing is listening on port 8001 on the api host, every proxied request from nginx receives an immediate TCP RST/\"Connection refused\", which nginx surfaces as a 502. The api service itself is healthy and successfully serving its own internal health checks and the two requests it did receive before nginx's proxy_pass target was seemingly changed/misconfigured, confirming the app is up and functioning correctly \u2014 the failure is purely in the nginx\u2192api routing configuration (wrong upstream port), not in the application, database, redis, or worker layers.",
+        "evidence": [
+          {
+            "source": "nginx logs",
+            "quote": "connect() failed (111: Connection refused) while connecting to upstream, client: 172.21.0.7, server: , request: \"GET /orders HTTP/1.1\", upstream: \"http://172.21.0.5:8001/orders\", host: \"nginx\""
+          },
+          {
+            "source": "api logs",
+            "quote": "INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)"
+          },
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:16:33,052 INFO GET /orders -> 200 23ms"
+          },
+          {
+            "source": "loadgen logs",
+            "quote": "GET /orders 502 2.502936s"
+          }
+        ],
+        "suggested_fix": "Correct the nginx upstream/proxy_pass configuration (or the api service's exposed port) so nginx forwards requests to the actual listening port 8000 (e.g., set `proxy_pass http://api:8000;` or align the api container's port mapping/env var with nginx's configured upstream port 8001). Reload nginx after fixing the config and verify /orders and /jobs return 200/202 through the edge."
+      },
+      "usage": {
+        "input_tokens": 8740,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 1191,
+        "cache_creation_input_tokens": 0
+      },
+      "wall_seconds": 13.6,
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 2
+    },
+    {
+      "system": "agent",
+      "case": "nginx-bad-upstream",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-141715-fe3e",
+      "answer": {
+        "root_cause_component": "nginx",
+        "root_cause_type": "misconfiguration",
+        "explanation": "Nginx's reverse-proxy config points the upstream for the api service at port 8001 (http://172.21.0.5:8001/...), but the api container actually binds and listens on port 8000 (uvicorn started with --port 8000, and its own healthcheck successfully hits localhost:8000/health). Because nothing is listening on 8001, every connection attempt from nginx to the api upstream is refused, so nginx returns 502 for all routes (/orders, /jobs, /health) while the api process itself is healthy and serving requests fine on port 8000 as shown by its own access logs. A direct TCP probe confirms connectivity to api:8000 succeeds while api:8001 fails, isolating the fault to the nginx upstream port configuration rather than to the api process, network, or its dependencies.",
+        "evidence": [
+          {
+            "source": "get_logs(nginx)",
+            "quote": "connect() failed (111: Connection refused) while connecting to upstream, client: 172.21.0.7, server: , request: \"GET /orders HTTP/1.1\", upstream: \"http://172.21.0.5:8001/orders\", host: \"nginx\""
+          },
+          {
+            "source": "exec_readonly(docker inspect api)",
+            "quote": "\"Cmd\": [\"uvicorn\", \"api:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8000\", \"--no-access-log\"]"
+          },
+          {
+            "source": "exec_readonly(docker inspect api)",
+            "quote": "\"Test\": [\"CMD\", \"python\", \"-c\", \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)\"]"
+          },
+          {
+            "source": "probe_connectivity(nginx->api:8001)",
+            "quote": "tcp: connect api:8001 FAILED (rc=1)"
+          },
+          {
+            "source": "probe_connectivity(nginx->api:8000)",
+            "quote": "tcp: connect api:8000 OK"
+          },
+          {
+            "source": "get_logs(api)",
+            "quote": "2026-08-29 14:16:33,052 INFO GET /orders -> 200 23ms"
+          }
+        ],
+        "suggested_fix": "Update nginx's upstream/proxy_pass configuration for the api service to point to port 8000 (matching the uvicorn --port setting and healthcheck), then reload nginx. Optionally standardize on a single port via an environment variable shared between the api Dockerfile/compose command and the nginx config to prevent this drift in the future."
+      },
+      "usage": {
+        "output_tokens": 1647,
+        "input_tokens": 24358,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0
+      },
+      "n_tool_calls": 6,
+      "wall_seconds": 20.1,
+      "trajectory": "trajectories/nginx-bad-upstream/20260829-141715-fe3e.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 2
+    }
+  ]
+}

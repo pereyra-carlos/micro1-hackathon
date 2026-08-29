@@ -1,0 +1,1195 @@
+{
+  "meta": {
+    "model": "claude-sonnet-5",
+    "repetitions": 3,
+    "systems": [
+      "baseline",
+      "agent"
+    ],
+    "agent_version": "v2 (probe_connectivity) + raw-SQL/inspect-cap tool fixes",
+    "note": "Eval set v3 additions only; merged from four per-case runs on identical HEAD 8bfd25f. Baseline rows are new measurements of the frozen baseline prompt on new cases.",
+    "source_runs": [
+      "results/20260829-141306",
+      "results/20260829-141748",
+      "results/20260829-142450",
+      "results/20260829-143052"
+    ]
+  },
+  "rows": [
+    {
+      "system": "baseline",
+      "case": "nginx-bad-upstream",
+      "model": "claude-sonnet-5",
+      "answer": {
+        "root_cause_component": "nginx",
+        "root_cause_type": "misconfiguration",
+        "explanation": "The API service is healthy and serving requests locally (uvicorn is bound to 0.0.0.0:8000 and its own /health checks return 200 consistently), so the backend itself is not down. However, nginx's proxy_pass/upstream configuration points to port 8001 on the api container (172.21.0.5:8001), which nothing is listening on, causing every proxied request to fail with 'Connection refused' and be translated into a 502 by nginx. This exactly matches the observed 502 flood on /orders and /jobs while nginx's own health endpoint (routed locally, not proxied) keeps returning 200, and while the api container's internal logs show it is up and processing its own /health checks fine (those are likely from a docker healthcheck hitting port 8000 directly, not via nginx). This is a classic port-mismatch misconfiguration between the reverse proxy and the upstream service.",
+        "evidence": [
+          {
+            "source": "nginx logs",
+            "quote": "2026/08/29 14:13:29 [error] 30#30: *1 connect() failed (111: Connection refused) while connecting to upstream, client: 172.21.0.7, server: , request: \"GET /orders HTTP/1.1\", upstream: \"http://172.21.0.5:8001/orders\", host: \"nginx\""
+          },
+          {
+            "source": "api logs",
+            "quote": "INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)"
+          },
+          {
+            "source": "nginx logs",
+            "quote": "127.0.0.1 \"GET /nginx-health HTTP/1.1\" 200 rt=0.000 urt=-"
+          },
+          {
+            "source": "loadgen logs",
+            "quote": "GET /orders 502 2.502771s"
+          }
+        ],
+        "suggested_fix": "Update the nginx upstream/proxy_pass configuration (default.conf or the templated conf) to point to the correct api port, 8000, instead of 8001, then reload/restart nginx. Also add a startup-time config validation or integration test that verifies nginx's upstream port matches the api container's actual listening port to prevent recurrence."
+      },
+      "usage": {
+        "input_tokens": 8741,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 1242,
+        "cache_creation_input_tokens": 0
+      },
+      "wall_seconds": 14.5,
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 0
+    },
+    {
+      "system": "agent",
+      "case": "nginx-bad-upstream",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-141407-9a7d",
+      "answer": {
+        "root_cause_component": "nginx",
+        "root_cause_type": "misconfiguration",
+        "explanation": "nginx's upstream/proxy_pass configuration points to the api service on port 8001, but the api container actually runs uvicorn bound to port 8000 (confirmed via docker inspect Cmd and the startup log 'Uvicorn running on http://0.0.0.0:8000'). Because nothing listens on 8001 inside the api container, every request nginx proxies (all routes, including /health) gets 'Connection refused' from the kernel and nginx returns 502 to the client. This matches the alert: 502s on all routes at ~100% while the api process itself is healthy and serving 200s directly on port 8000 (visible in api logs and confirmed by probe_connectivity showing api:8000 reachable but api:8001 refused). The api, worker, postgres, and redis are otherwise fully healthy, so the fault is isolated to nginx's upstream port misconfiguration, not a downstream outage.",
+        "evidence": [
+          {
+            "source": "get_logs(nginx)",
+            "quote": "connect() failed (111: Connection refused) while connecting to upstream, client: 172.21.0.7, server: , request: \"GET /orders HTTP/1.1\", upstream: \"http://172.21.0.5:8001/orders\", host: \"nginx\""
+          },
+          {
+            "source": "get_logs(api)",
+            "quote": "INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)"
+          },
+          {
+            "source": "exec_readonly(docker inspect api)",
+            "quote": "\"Cmd\": [\"uvicorn\",\"api:app\",\"--host\",\"0.0.0.0\",\"--port\",\"8000\",\"--no-access-log\"]"
+          },
+          {
+            "source": "probe_connectivity(nginx->api:8001)",
+            "quote": "tcp: connect api:8001 FAILED (rc=1)"
+          },
+          {
+            "source": "probe_connectivity(nginx->api:8000)",
+            "quote": "tcp: connect api:8000 OK"
+          }
+        ],
+        "suggested_fix": "Update nginx's upstream/proxy_pass definition (nginx.conf / default.conf) to target api:8000 instead of api:8001, then reload/restart nginx. Optionally add a startup config validation or explicit port env var shared between the api service and nginx template to prevent this drift in future."
+      },
+      "usage": {
+        "output_tokens": 1506,
+        "input_tokens": 24177,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0
+      },
+      "n_tool_calls": 6,
+      "wall_seconds": 19.2,
+      "trajectory": "trajectories/nginx-bad-upstream/20260829-141407-9a7d.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 0
+    },
+    {
+      "system": "baseline",
+      "case": "nginx-bad-upstream",
+      "model": "claude-sonnet-5",
+      "answer": {
+        "root_cause_component": "nginx",
+        "root_cause_type": "misconfiguration",
+        "explanation": "All /orders and /jobs requests through the edge return 502 because nginx cannot even open a TCP connection to the upstream app (ECONNREFUSED), not because the app is failing. The nginx error log shows it is trying to reach the API at 172.21.0.4:8001, while the api container's own logs show uvicorn is listening on port 8000 (\"Uvicorn running on http://0.0.0.0:8000\"). Since nothing is listening on 8001, every proxied request is refused immediately (rt=0.000/0.001s), producing the 502 storm seen by loadgen and the alert, while direct health checks to the correct port (used by the docker healthcheck) succeed and keep the api container marked healthy. Postgres, redis, and worker are all healthy and unrelated to the failure. The mismatch between the nginx upstream port (8001) and the api's actual listening port (8000) is a configuration error in the nginx upstream/proxy_pass definition (or an unsynced env var), not an api crash or resource issue.",
+        "evidence": [
+          {
+            "source": "nginx logs",
+            "quote": "connect() failed (111: Connection refused) while connecting to upstream, client: 172.21.0.7, server: , request: \"GET /orders HTTP/1.1\", upstream: \"http://172.21.0.4:8001/orders\", host: \"nginx\""
+          },
+          {
+            "source": "api logs",
+            "quote": "INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)"
+          },
+          {
+            "source": "nginx logs",
+            "quote": "172.21.0.7 \"GET /orders HTTP/1.1\" 502 rt=0.000 urt=0.000"
+          },
+          {
+            "source": "loadgen logs",
+            "quote": "GET /orders 502 0.001050s"
+          }
+        ],
+        "suggested_fix": "Align the nginx upstream/proxy_pass configuration with the api's actual listening port (change upstream target from 8001 to 8000, or set the api to listen on 8001 consistently), then reload nginx and confirm docker-compose service env vars for the api port match across both configs; add a startup check that fails fast if the configured upstream port doesn't match the app's bound port."
+      },
+      "usage": {
+        "input_tokens": 8741,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 1440,
+        "cache_creation_input_tokens": 0
+      },
+      "wall_seconds": 16.1,
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 1
+    },
+    {
+      "system": "agent",
+      "case": "nginx-bad-upstream",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-141540-a52c",
+      "answer": {
+        "root_cause_component": "nginx",
+        "root_cause_type": "misconfiguration",
+        "explanation": "nginx is loaded with a bind-mounted config file literally named nginx-broken.conf, whose upstream/proxy_pass directive points at port 8001 on the api container. The api process, however, is started via uvicorn on port 8000 (confirmed by the Cmd/Args and startup log 'Uvicorn running on http://0.0.0.0:8000'), and no process is listening on 8001. Every request nginx forwards therefore gets 'Connection refused' from the api container's IP:8001, which nginx turns into a 502 to the client. The api and its dependencies (postgres/redis) are healthy and serving requests internally on 8000 (visible in api's own access log with 200/202 statuses), proving the fault is purely in nginx's upstream port configuration, not in the api/db/queue layer.",
+        "evidence": [
+          {
+            "source": "get_logs(nginx)",
+            "quote": "connect() failed (111: Connection refused) while connecting to upstream, client: 172.21.0.7, server: , request: \"GET /orders HTTP/1.1\", upstream: \"http://172.21.0.4:8001/orders\", host: \"nginx\""
+          },
+          {
+            "source": "exec_readonly(docker inspect api)",
+            "quote": "\"Cmd\": [\"uvicorn\",\"api:app\",\"--host\",\"0.0.0.0\",\"--port\",\"8000\",\"--no-access-log\"]"
+          },
+          {
+            "source": "get_logs(api)",
+            "quote": "INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)"
+          },
+          {
+            "source": "exec_readonly(docker inspect api)",
+            "quote": "\"IPAddress\": \"172.21.0.4\""
+          },
+          {
+            "source": "exec_readonly(docker inspect nginx)",
+            "quote": "\"Source\": \"/home/carlos/Trabajo/hackathon-micro1/lab/nginx/nginx-broken.conf\", \"Destination\": \"/etc/nginx/nginx.conf\""
+          },
+          {
+            "source": "get_logs(api)",
+            "quote": "2026-08-29 14:15:44,273 INFO GET /health -> 200 14ms"
+          }
+        ],
+        "suggested_fix": "Update/replace the nginx config (currently mounted from nginx-broken.conf) so the proxy_pass/upstream for the api service targets port 8000 (matching the uvicorn --port 8000 the api container actually listens on), or revert to the known-good nginx.conf. Reload/restart nginx after fixing, then verify GET /health through the edge returns 200."
+      },
+      "usage": {
+        "output_tokens": 1785,
+        "input_tokens": 29812,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0
+      },
+      "n_tool_calls": 5,
+      "wall_seconds": 23.3,
+      "trajectory": "trajectories/nginx-bad-upstream/20260829-141540-a52c.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 1
+    },
+    {
+      "system": "baseline",
+      "case": "nginx-bad-upstream",
+      "model": "claude-sonnet-5",
+      "answer": {
+        "root_cause_component": "nginx",
+        "root_cause_type": "misconfiguration",
+        "explanation": "Nginx is configured to proxy to the api upstream on port 8001 (`http://172.21.0.5:8001/...`), but the api container's uvicorn process is actually listening on port 8000 (`Uvicorn running on http://0.0.0.0:8000`). Because nothing is listening on port 8001 on the api host, every proxied request from nginx receives an immediate TCP RST/\"Connection refused\", which nginx surfaces as a 502. The api service itself is healthy and successfully serving its own internal health checks and the two requests it did receive before nginx's proxy_pass target was seemingly changed/misconfigured, confirming the app is up and functioning correctly \u2014 the failure is purely in the nginx\u2192api routing configuration (wrong upstream port), not in the application, database, redis, or worker layers.",
+        "evidence": [
+          {
+            "source": "nginx logs",
+            "quote": "connect() failed (111: Connection refused) while connecting to upstream, client: 172.21.0.7, server: , request: \"GET /orders HTTP/1.1\", upstream: \"http://172.21.0.5:8001/orders\", host: \"nginx\""
+          },
+          {
+            "source": "api logs",
+            "quote": "INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)"
+          },
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:16:33,052 INFO GET /orders -> 200 23ms"
+          },
+          {
+            "source": "loadgen logs",
+            "quote": "GET /orders 502 2.502936s"
+          }
+        ],
+        "suggested_fix": "Correct the nginx upstream/proxy_pass configuration (or the api service's exposed port) so nginx forwards requests to the actual listening port 8000 (e.g., set `proxy_pass http://api:8000;` or align the api container's port mapping/env var with nginx's configured upstream port 8001). Reload nginx after fixing the config and verify /orders and /jobs return 200/202 through the edge."
+      },
+      "usage": {
+        "input_tokens": 8740,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 1191,
+        "cache_creation_input_tokens": 0
+      },
+      "wall_seconds": 13.6,
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 2
+    },
+    {
+      "system": "agent",
+      "case": "nginx-bad-upstream",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-141715-fe3e",
+      "answer": {
+        "root_cause_component": "nginx",
+        "root_cause_type": "misconfiguration",
+        "explanation": "Nginx's reverse-proxy config points the upstream for the api service at port 8001 (http://172.21.0.5:8001/...), but the api container actually binds and listens on port 8000 (uvicorn started with --port 8000, and its own healthcheck successfully hits localhost:8000/health). Because nothing is listening on 8001, every connection attempt from nginx to the api upstream is refused, so nginx returns 502 for all routes (/orders, /jobs, /health) while the api process itself is healthy and serving requests fine on port 8000 as shown by its own access logs. A direct TCP probe confirms connectivity to api:8000 succeeds while api:8001 fails, isolating the fault to the nginx upstream port configuration rather than to the api process, network, or its dependencies.",
+        "evidence": [
+          {
+            "source": "get_logs(nginx)",
+            "quote": "connect() failed (111: Connection refused) while connecting to upstream, client: 172.21.0.7, server: , request: \"GET /orders HTTP/1.1\", upstream: \"http://172.21.0.5:8001/orders\", host: \"nginx\""
+          },
+          {
+            "source": "exec_readonly(docker inspect api)",
+            "quote": "\"Cmd\": [\"uvicorn\", \"api:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8000\", \"--no-access-log\"]"
+          },
+          {
+            "source": "exec_readonly(docker inspect api)",
+            "quote": "\"Test\": [\"CMD\", \"python\", \"-c\", \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)\"]"
+          },
+          {
+            "source": "probe_connectivity(nginx->api:8001)",
+            "quote": "tcp: connect api:8001 FAILED (rc=1)"
+          },
+          {
+            "source": "probe_connectivity(nginx->api:8000)",
+            "quote": "tcp: connect api:8000 OK"
+          },
+          {
+            "source": "get_logs(api)",
+            "quote": "2026-08-29 14:16:33,052 INFO GET /orders -> 200 23ms"
+          }
+        ],
+        "suggested_fix": "Update nginx's upstream/proxy_pass configuration for the api service to point to port 8000 (matching the uvicorn --port setting and healthcheck), then reload nginx. Optionally standardize on a single port via an environment variable shared between the api Dockerfile/compose command and the nginx config to prevent this drift in the future."
+      },
+      "usage": {
+        "output_tokens": 1647,
+        "input_tokens": 24358,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0
+      },
+      "n_tool_calls": 6,
+      "wall_seconds": 20.1,
+      "trajectory": "trajectories/nginx-bad-upstream/20260829-141715-fe3e.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 2
+    },
+    {
+      "system": "baseline",
+      "case": "redis-auth",
+      "model": "claude-sonnet-5",
+      "answer": {
+        "root_cause_component": "redis",
+        "root_cause_type": "misconfiguration",
+        "explanation": "The API's POST /jobs handler enqueues each job onto Redis before returning; normally this is fast (2\u20114 ms, HTTP 202). Starting mid\u2011incident, every POST /jobs call instead takes ~2.03s and returns 200, exactly matching the retry/timeout window seen in the worker logs. The worker's Redis client is repeatedly failing to connect with `redis.exceptions.AuthenticationError: Authentication required` (NOAUTH), meaning Redis is now enforcing authentication that the worker (and presumably the API's redis client, sharing the same instance/credentials) is not providing. Because Redis rejects the connection, the worker can never pull jobs from the queue, and the API's own path to Redis is also blocked/retried, which manifests as the API blocking for ~2s per POST /jobs (a client-side connection/auth retry timeout) before ultimately falling through and returning 200 with the queue write likely bypassed or degraded. This produces the observed p95 latency spike on POST /jobs while error rate stays \"normal\" (calls still return 200, just slow), and explains the API health check intermittently returning 503 (its own health probe likely checks Redis connectivity too). Postgres and nginx are healthy and uninvolved; the fault chain originates at Redis's authentication requirement not being satisfied by its clients.",
+        "evidence": [
+          {
+            "source": "worker logs",
+            "quote": "redis.exceptions.AuthenticationError: Authentication required."
+          },
+          {
+            "source": "worker logs",
+            "quote": "2026-08-29 14:18:07,691 ERROR job processing failed, retrying in 5s"
+          },
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:18:05,660 INFO POST /jobs -> 202 2ms"
+          },
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:18:10,730 INFO POST /jobs -> 200 2031ms"
+          },
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:18:11,399 INFO GET /health -> 503 14ms"
+          },
+          {
+            "source": "nginx logs",
+            "quote": "172.21.0.7 \"POST /jobs HTTP/1.1\" 200 rt=2.033 urt=2.033"
+          },
+          {
+            "source": "docker compose ps",
+            "quote": "incident-lab-api-1 ... Up 36 seconds (unhealthy)"
+          }
+        ],
+        "suggested_fix": "Verify Redis auth configuration: check whether `requirepass`/ACL was enabled on the redis service (env var, config file, or CONFIG SET) without updating the API and worker connection strings/env vars (e.g., REDIS_PASSWORD) to match. Align credentials across api, worker, and redis (or disable requirepass if auth wasn't intended for this lab), restart worker and api, and confirm POST /jobs returns to ~2-5ms with the worker successfully draining the queue (no more AuthenticationError in worker logs) and /health returning 200 consistently."
+      },
+      "usage": {
+        "output_tokens": 4057,
+        "input_tokens": 11589,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0
+      },
+      "wall_seconds": 46.5,
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 0
+    },
+    {
+      "system": "agent",
+      "case": "redis-auth",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-141923-c34d",
+      "answer": {
+        "root_cause_component": "redis",
+        "root_cause_type": "misconfiguration",
+        "explanation": "Redis has `requirepass` enabled, but both api and worker are configured with `REDIS_URL=redis://redis:6379/0` (no password). The worker fails every connection attempt with `AuthenticationError: Authentication required.` and can never BLPOP jobs, so the queue backs up. The api, on POST /jobs, also cannot authenticate to Redis to enqueue the job; it appears to retry/timeout against Redis for ~2s before falling back and returning 200, which is exactly the elevated p95 latency (2015-2033ms) seen in the alert. GET /health independently reports `queue: unreachable` confirming Redis connectivity is broken, and GET /orders (no Redis dependency) stays fast, isolating the fault to the Redis link rather than api/postgres/network capacity.",
+        "evidence": [
+          {
+            "source": "get_logs(worker)",
+            "quote": "redis.exceptions.AuthenticationError: Authentication required."
+          },
+          {
+            "source": "get_logs(api)",
+            "quote": "2026-08-29 14:18:10,730 INFO POST /jobs -> 200 2031ms"
+          },
+          {
+            "source": "get_status",
+            "quote": "GET /health -> 503 {\"db\":\"ok\",\"queue\":\"unreachable\"}"
+          },
+          {
+            "source": "exec_readonly(redis-cli config get requirepass)",
+            "quote": "NOAUTH Authentication required."
+          },
+          {
+            "source": "docker inspect worker",
+            "quote": "\"REDIS_URL=redis://redis:6379/0\""
+          }
+        ],
+        "suggested_fix": "Set the correct Redis password in the api and worker REDIS_URL (or via a REDIS_PASSWORD env var) to match Redis's requirepass, e.g. REDIS_URL=redis://:<password>@redis:6379/0, then restart api and worker so the queue can be reached again and the backlog drains."
+      },
+      "usage": {
+        "cache_read_input_tokens": 0,
+        "input_tokens": 29368,
+        "output_tokens": 1596,
+        "cache_creation_input_tokens": 0
+      },
+      "n_tool_calls": 6,
+      "wall_seconds": 21.9,
+      "trajectory": "trajectories/redis-auth/20260829-141923-c34d.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 0
+    },
+    {
+      "system": "baseline",
+      "case": "redis-auth",
+      "model": "claude-sonnet-5",
+      "answer": {
+        "root_cause_component": "redis",
+        "root_cause_type": "misconfiguration",
+        "explanation": "The API's POST /jobs handler enqueues a job in Redis and then waits (with a ~2s timeout) for the worker to signal completion before responding. The worker successfully processed the very first job, but its Redis connection was then dropped (\"Connection closed by server\") and every subsequent reconnect attempt fails with \"redis.exceptions.AuthenticationError: Authentication required.\" (NOAUTH), meaning Redis is now enforcing authentication that the worker's client isn't configured to satisfy. Because the worker can no longer BLPOP from the queue, no job ever completes, so every API request that enqueues a job blocks for the full internal timeout (~2.03s) before falling back and returning 200 instead of the fast 202 seen on the first request. This exactly matches the nginx/api/loadgen logs, where latency jumps from ~2-4ms to a consistent ~2.03s immediately after the first successful job, with error rate staying \"normal\" because the API still returns 200/202 (just slow) rather than failing outright. Postgres and nginx show no issues, and the API/nginx processes themselves are healthy, confirming the root cause is upstream in the Redis/worker path rather than in the API code or infra directly serving HTTP.",
+        "evidence": [
+          {
+            "source": "worker logs",
+            "quote": "redis.exceptions.ConnectionError: Connection closed by server."
+          },
+          {
+            "source": "worker logs",
+            "quote": "redis.exceptions.AuthenticationError: Authentication required."
+          },
+          {
+            "source": "worker logs",
+            "quote": "2026-08-29 14:20:17,902 INFO processed job 1e6b89ea60b2 in 2.0s\nworker-1  | 2026-08-29 14:20:17,904 ERROR job processing failed, retrying in 5s"
+          },
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:20:15,868 INFO POST /jobs -> 202 2ms"
+          },
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:20:20,938 INFO POST /jobs -> 200 2031ms"
+          },
+          {
+            "source": "nginx logs",
+            "quote": "172.21.0.7 \"POST /jobs HTTP/1.1\" 202 rt=0.004 urt=0.004"
+          },
+          {
+            "source": "nginx logs",
+            "quote": "172.21.0.7 \"POST /jobs HTTP/1.1\" 200 rt=2.032 urt=2.033"
+          },
+          {
+            "source": "loadgen logs",
+            "quote": "POST /jobs 200 2.033908s"
+          }
+        ],
+        "suggested_fix": "Reconcile Redis authentication: verify whether requirepass/ACL was enabled on the redis-1 instance (e.g., via an image/config change or restart) and either disable auth for this lab environment or supply the correct REDIS_PASSWORD/ACL credentials to the worker's Redis client so it can reconnect and resume BLPOP on the job queue. After restoring worker connectivity, confirm the API's synchronous job-wait path returns to sub-100ms latency, and consider adding alerting/retries with backoff plus a circuit breaker in the API when the worker/queue path is unhealthy so latency degrades gracefully instead of pinning at the timeout value."
+      },
+      "usage": {
+        "output_tokens": 4463,
+        "input_tokens": 11591,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0
+      },
+      "wall_seconds": 51.3,
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 1
+    },
+    {
+      "system": "agent",
+      "case": "redis-auth",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-142138-b143",
+      "answer": {
+        "root_cause_component": "redis",
+        "root_cause_type": "misconfiguration",
+        "explanation": "Redis is running with authentication required (requirepass set), but both the api and worker containers are configured with REDIS_URL=redis://redis:6379/0 (no password). Every redis command from api/worker therefore fails with AuthenticationError. The worker's blpop loop can never authenticate, so it never drains the jobs queue (health check correctly reports queue:\"unreachable\"). The api's POST /jobs handler, on failing to enqueue to redis, falls back to a slow synchronous path (or retries) that takes ~2s per request before returning 200 instead of the normal fast 202 enqueue response \u2014 this is exactly the p95 latency spike seen on POST /jobs. GET /orders and GET /health (db check) stay fast because they don't depend on redis for their main logic, confirming the fault is isolated to the redis dependency rather than api/db capacity.",
+        "evidence": [
+          {
+            "source": "exec_readonly redis-cli info clients",
+            "quote": "NOAUTH Authentication required."
+          },
+          {
+            "source": "get_logs worker",
+            "quote": "redis.exceptions.AuthenticationError: Authentication required.\n2026-08-29 14:21:47,947 ERROR job processing failed, retrying in 5s"
+          },
+          {
+            "source": "get_logs api",
+            "quote": "2026-08-29 14:20:15,868 INFO POST /jobs -> 202 2ms\n... 2026-08-29 14:20:20,938 INFO POST /jobs -> 200 2031ms"
+          },
+          {
+            "source": "get_status",
+            "quote": "GET /health -> 503 {\"db\":\"ok\",\"queue\":\"unreachable\"}"
+          },
+          {
+            "source": "docker inspect api",
+            "quote": "\"REDIS_URL=redis://redis:6379/0\""
+          },
+          {
+            "source": "docker inspect worker",
+            "quote": "\"REDIS_URL=redis://redis:6379/0\""
+          },
+          {
+            "source": "exec_readonly redis-cli config get requirepass",
+            "quote": "NOAUTH Authentication required."
+          }
+        ],
+        "suggested_fix": "Align redis credentials across services: either disable requirepass on the redis container (if auth wasn't intended in this env) or set REDIS_PASSWORD/REDIS_URL with the correct password (redis://:<password>@redis:6379/0) for both api and worker, then restart api and worker so they can authenticate, drain the backlog, and restore fast enqueue (202) responses. Also fix the redis healthcheck (currently 'redis-cli ping' returns exit 0 even on NOAUTH error) so it fails when auth is misconfigured, e.g. use 'redis-cli -a $REDIS_PASSWORD ping' and grep for PONG."
+      },
+      "usage": {
+        "cache_read_input_tokens": 0,
+        "input_tokens": 56082,
+        "output_tokens": 3792,
+        "cache_creation_input_tokens": 0
+      },
+      "n_tool_calls": 10,
+      "wall_seconds": 48.5,
+      "trajectory": "trajectories/redis-auth/20260829-142138-b143.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 1
+    },
+    {
+      "system": "baseline",
+      "case": "redis-auth",
+      "model": "claude-sonnet-5",
+      "answer": {
+        "root_cause_component": "worker",
+        "root_cause_type": "misconfiguration",
+        "explanation": "The nginx/api/loadgen logs show POST /jobs going from a fast 202 (queued) to a consistent ~2.03s 200 response, which is the signature of the API blocking/polling for a job to reach completion before responding, up to a fixed ~2s timeout. The worker logs reveal the actual failure: after successfully processing one job, every subsequent redis connection attempt from the worker fails with `redis.exceptions.AuthenticationError: Authentication required.` This means the worker's redis client is not sending (or is sending wrong) credentials required by the redis server's auth configuration, so the worker can no longer pull jobs off the queue (`BLPOP`) or complete them. With jobs stuck unprocessed in redis, the API's synchronous wait-for-completion logic on POST /jobs times out at ~2s for every request, producing the observed p95 latency spike \u2014 while error rates stay normal because the API still eventually returns 200 after the timeout rather than failing outright. Postgres and redis themselves are healthy and responsive; the bottleneck is purely the broken worker\u2192redis authentication path stalling job completion.",
+        "evidence": [
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:23:01,905 INFO POST /jobs -> 200 2025ms"
+          },
+          {
+            "source": "nginx logs",
+            "quote": "172.21.0.7 \"POST /jobs HTTP/1.1\" 200 rt=2.027 urt=2.026"
+          },
+          {
+            "source": "worker logs",
+            "quote": "redis.exceptions.AuthenticationError: Authentication required."
+          },
+          {
+            "source": "worker logs",
+            "quote": "2026-08-29 14:22:58,875 ERROR job processing failed, retrying in 5s"
+          },
+          {
+            "source": "worker logs",
+            "quote": "2026-08-29 14:22:58,874 INFO processed job 9511684dc42c in 2.0s"
+          }
+        ],
+        "suggested_fix": "Verify and align redis authentication credentials between the worker and redis services (e.g., check REDIS_PASSWORD/REDIS_URL env vars used by worker vs. the requirepass/ACL configured on the redis container), redeploy the worker with correct credentials, and confirm it can again BLPOP from the queue and drain the backlog; also consider adding a circuit breaker/shorter timeout in the API's job-wait logic so a stalled worker degrades gracefully instead of adding fixed 2s latency to every POST /jobs request."
+      },
+      "usage": {
+        "output_tokens": 2626,
+        "input_tokens": 11587,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0
+      },
+      "wall_seconds": 29.8,
+      "grade": {
+        "component_match": false,
+        "fault_match": true,
+        "correct": false
+      },
+      "repetition": 2
+    },
+    {
+      "system": "agent",
+      "case": "redis-auth",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-142357-5549",
+      "answer": {
+        "root_cause_component": "redis",
+        "root_cause_type": "misconfiguration",
+        "explanation": "Redis now requires authentication (requirepass is set), but the api and worker containers are configured with REDIS_URL=redis://redis:6379/0 \u2014 no password. Every command the api/worker send to Redis (LPUSH for enqueue, BLPOP for dequeue) is rejected with 'NOAUTH Authentication required.' The api's /jobs handler retries/waits on the failing Redis call before giving up, which is why POST /jobs consistently takes ~2.0s (a retry/timeout ceiling) instead of the normal <100ms, even though it still eventually returns 200/202 having failed to actually enqueue the job. The worker can never successfully BLPOP either, so jobs are not processed (queue backs up), and /health reports 'queue: unreachable' confirming Redis connectivity is broken at the auth layer, not the network layer (TCP connect to redis:6379 succeeds fine per probe_connectivity). Postgres is unaffected, so error rate stays normal while latency balloons only on the Redis-dependent path.</explanation>\n<parameter name=\"evidence\">[{\"source\":\"exec_readonly redis-cli info memory\",\"quote\":\"NOAUTH Authentication required.\"},{\"source\":\"exec_readonly redis-cli config get requirepass\",\"quote\":\"NOAUTH Authentication required.\"},{\"source\":\"get_logs worker\",\"quote\":\"redis.exceptions.AuthenticationError: Authentication required.\\nworker-1  | 2026-08-29 14:24:23,918 ERROR job processing failed, retrying in 5s\"},{\"source\":\"get_status\",\"quote\":\"GET /health -> 503 {\\\"db\\\":\\\"ok\\\",\\\"queue\\\":\\\"unreachable\\\"}\"},{\"source\":\"get_logs api\",\"quote\":\"2026-08-29 14:23:01,905 INFO POST /jobs -> 200 2025ms\"},{\"source\":\"docker inspect api\",\"quote\":\"\\\"REDIS_URL=redis://redis:6379/0\\\"\"},{\"source\":\"probe_connectivity api->redis\",\"quote\":\"tcp: connect 172.21.0.2:6379 OK\"}]",
+        "evidence": [],
+        "suggested_fix": "Align Redis auth configuration: either supply the correct password to the api and worker via REDIS_URL (e.g. redis://:<password>@redis:6379/0) matching Redis's requirepass, or if the auth requirement was introduced unintentionally (e.g. via a mounted redis.conf or manual CONFIG SET that persisted), remove/disable requirepass on the Redis service to restore the previous no-auth trust boundary. After the fix, verify the worker can BLPOP without AuthenticationError and /health reports queue: ok."
+      },
+      "usage": {
+        "cache_read_input_tokens": 0,
+        "input_tokens": 46706,
+        "output_tokens": 2903,
+        "cache_creation_input_tokens": 0
+      },
+      "n_tool_calls": 9,
+      "wall_seconds": 39.4,
+      "trajectory": "trajectories/redis-auth/20260829-142357-5549.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 2
+    },
+    {
+      "system": "baseline",
+      "case": "pg-lock",
+      "model": "claude-sonnet-5",
+      "answer": {
+        "root_cause_component": "api",
+        "root_cause_type": "code_bug",
+        "explanation": "The first GET /orders call completes normally (200, 24ms) and the /jobs and /health endpoints continue to respond fast throughout the incident, ruling out a general API, network, postgres, or redis outage (postgres and redis logs show clean, healthy startup with no errors, and the worker successfully processed a queued job). However, the very next GET /orders call never produces a completion log line in the api service at all - it simply vanishes until nginx cuts it off with a 499 after the full 15s client timeout, and this pattern is confirmed by loadgen ('GET /orders 000 15.002406s'). Because only the /orders code path is affected while every other route (including /jobs, which also touches the DB/queue) stays fast, the most consistent explanation is a bug specific to the /orders handler - e.g. it fails to release its database connection/transaction back to the pool after the first successful call, so the pool's single connection (or the row/table lock it holds) is never freed. The next /orders request then blocks indefinitely waiting on that connection/lock, hanging until the client gives up, while unrelated endpoints that don't depend on the leaked resource continue to work normally.",
+        "evidence": [
+          {
+            "source": "nginx log",
+            "quote": "172.21.0.7 \"GET /orders HTTP/1.1\" 200 rt=0.030 urt=0.030"
+          },
+          {
+            "source": "nginx log",
+            "quote": "172.21.0.7 \"GET /orders HTTP/1.1\" 499 rt=15.001 urt=15.002"
+          },
+          {
+            "source": "api log",
+            "quote": "2026-08-29 14:25:07,253 INFO GET /orders -> 200 24ms"
+          },
+          {
+            "source": "loadgen log",
+            "quote": "GET /orders 000 15.002406s"
+          },
+          {
+            "source": "api log",
+            "quote": "2026-08-29 14:25:08,266 INFO POST /jobs -> 202 2ms"
+          },
+          {
+            "source": "postgres log",
+            "quote": "2026-08-29 14:25:00.133 UTC [1] LOG:  database system is ready to accept connections"
+          }
+        ],
+        "suggested_fix": "Audit the /orders handler for DB connection/transaction handling: ensure every code path (including early returns and exceptions) releases the connection back to the pool and commits/rolls back transactions; add explicit timeouts on DB acquisition and queries; consider using a context manager (e.g. `async with pool.acquire()`) instead of manual acquire/release, and increase pool size/observability (log pool checkout/checkin) to catch leaks in testing before production."
+      },
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 2561,
+        "input_tokens": 6174
+      },
+      "wall_seconds": 29.8,
+      "grade": {
+        "component_match": false,
+        "fault_match": false,
+        "correct": false
+      },
+      "repetition": 0
+    },
+    {
+      "system": "agent",
+      "case": "pg-lock",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-142609-f85c",
+      "answer": {
+        "root_cause_component": "postgres",
+        "root_cause_type": "other",
+        "explanation": "A psql session (pid 87) opened a transaction that runs `LOCK TABLE orders IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(3600)`, taking an exclusive lock on the `orders` table and then sleeping for an hour while holding it. Every subsequent query touching `orders` (the API's `SELECT id, item, status FROM orders ORDER BY id DESC LIMIT 10` used by GET /orders, and even a plain `SELECT count(*) FROM orders`) queues behind this lock and blocks indefinitely, which is exactly why GET /orders hangs past the 15s client timeout while POST /jobs (which never touches the orders table/lock, just pushes to redis) remains fast. This is not an API or connection-pool bug: pg_stat_activity shows the backend actively holding the ACCESS EXCLUSIVE lock and all /orders-related backends stuck in `Lock`/`relation` wait state behind it.",
+        "evidence": [
+          {
+            "source": "exec_readonly psql pg_stat_activity",
+            "quote": "87 | active | Timeout         | PgSleep    | BEGIN; LOCK TABLE orders IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(3600);                                                                               | 00:01:08.115956"
+          },
+          {
+            "source": "exec_readonly psql pg_stat_activity",
+            "quote": "88 | active | Lock            | relation   | SELECT id, item, status FROM orders ORDER BY id DESC LIMIT 10                                                                                           | 00:01:07.297619"
+          },
+          {
+            "source": "get_logs loadgen",
+            "quote": "GET /orders 000 15.002406s"
+          },
+          {
+            "source": "exec_readonly psql pid 87 detail",
+            "quote": "87 | app     | psql             |             | 2026-08-29 14:25:09.467257+00 | active | BEGIN; LOCK TABLE orders IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(3600);"
+          }
+        ],
+        "suggested_fix": "Terminate the offending backend (e.g. `SELECT pg_terminate_backend(87);`) to release the ACCESS EXCLUSIVE lock on `orders`, restoring normal query throughput. Then identify and eliminate the source of this manual/ad-hoc lock+sleep session (likely a stray maintenance script or debugging session left running against production), and consider adding a statement/lock timeout (e.g. `lock_timeout`, `statement_timeout`) on the app role to prevent a single session from blocking the table indefinitely in the future."
+      },
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 1656,
+        "input_tokens": 15187
+      },
+      "n_tool_calls": 5,
+      "wall_seconds": 23.6,
+      "trajectory": "trajectories/pg-lock/20260829-142609-f85c.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 0
+    },
+    {
+      "system": "baseline",
+      "case": "pg-lock",
+      "model": "claude-sonnet-5",
+      "answer": {
+        "root_cause_component": "worker",
+        "root_cause_type": "code_bug",
+        "explanation": "The first GET /orders succeeded quickly (24ms), but every subsequent GET /orders request from the api never returns and never even logs a completion line, hanging until nginx's 15s upstream timeout fires (499). Meanwhile POST /jobs and GET /health continue to respond instantly, showing the api process, nginx, redis and postgres connectivity are all otherwise healthy \u2014 this rules out generic resource exhaustion (CPU, connection pool for all queries) and points to a query-specific block. The worker log shows it picked up exactly one job (\"processed job 2e477deb974e in 2.0s\") and then goes silent for the rest of the incident window even though POST /jobs keeps enqueuing new jobs (202 responses continue). This pattern is consistent with the worker opening a transaction against the orders/reports tables for a job and never committing or rolling it back (e.g. an exception after acquiring a row/table lock, or a lock intentionally held while waiting on something that never completes). That open transaction holds a lock on the orders table in postgres, so the api's GET /orders query \u2014 which must read/lock the same rows \u2014 blocks indefinitely waiting for the lock, hangs past the nginx timeout, and the client sees a 000/timeout while nginx logs a 499. Because /jobs and /health don't touch the locked rows, they remain fast, exactly matching the reported symptom that only GET /orders is affected.",
+        "evidence": [
+          {
+            "source": "worker log",
+            "quote": "2026-08-29 14:27:13,921 INFO processed job 2e477deb974e in 2.0s"
+          },
+          {
+            "source": "nginx log",
+            "quote": "172.21.0.7 \"GET /orders HTTP/1.1\" 499 rt=15.001 urt=15.001"
+          },
+          {
+            "source": "api log",
+            "quote": "2026-08-29 14:27:10,877 INFO GET /orders -> 200 24ms"
+          },
+          {
+            "source": "api log",
+            "quote": "2026-08-29 14:27:12,451 INFO GET /health -> 200 13ms"
+          },
+          {
+            "source": "loadgen log",
+            "quote": "GET /orders 000 15.001989s"
+          },
+          {
+            "source": "loadgen log",
+            "quote": "POST /jobs 202 0.003168s"
+          }
+        ],
+        "suggested_fix": "Inspect the worker's job-processing code path for the report/orders write: ensure every DB transaction is wrapped so it always commits or rolls back (use try/finally or a context manager), and add a statement/lock timeout so a stuck transaction can't block reads indefinitely. As an immediate mitigation, check postgres `pg_stat_activity`/`pg_locks` for a long-running or idle-in-transaction session from the worker and terminate it, then restart the worker with the transaction-handling fix and add alerting on idle-in-transaction duration."
+      },
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 2282,
+        "input_tokens": 6173
+      },
+      "wall_seconds": 26.8,
+      "grade": {
+        "component_match": false,
+        "fault_match": false,
+        "correct": false
+      },
+      "repetition": 1
+    },
+    {
+      "system": "agent",
+      "case": "pg-lock",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-142809-24fe",
+      "answer": {
+        "root_cause_component": "postgres",
+        "root_cause_type": "resource_exhaustion",
+        "explanation": "A session (pid 87) executed `BEGIN; LOCK TABLE orders IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(3600);` and has held that exclusive lock for over a minute while sleeping for an hour. Every subsequent query against the orders table (the `SELECT id, item, status FROM orders ORDER BY id DESC LIMIT 10` issued by GET /orders, and even a `SELECT count(*) FROM orders`) queues up behind this lock and blocks indefinitely, waiting on wait_event_type=Lock. Since /orders is the only endpoint that touches the orders table, it hangs past the client's 15s timeout while /jobs and /health, which don't need that table/lock, continue to respond normally. The API and worker processes themselves are healthy; the root cause is entirely inside postgres due to an orphaned/stuck transaction holding a table-level exclusive lock.",
+        "evidence": [
+          {
+            "source": "exec_readonly psql pg_stat_activity",
+            "quote": "87 | active | Timeout | PgSleep | BEGIN; LOCK TABLE orders IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(3600); | 00:01:07.033099"
+          },
+          {
+            "source": "exec_readonly psql pg_stat_activity",
+            "quote": "88 | active | Lock | relation | SELECT id, item, status FROM orders ORDER BY id DESC LIMIT 10 | 00:01:06.209332"
+          },
+          {
+            "source": "exec_readonly psql pg_stat_activity",
+            "quote": "114 | active | Lock | relation | SELECT count(*) FROM orders | 00:00:50.200059"
+          }
+        ],
+        "suggested_fix": "Terminate the blocking backend (SELECT pg_kill/pg_terminate_backend(87)) to release the ACCESS EXCLUSIVE lock on orders, which will unblock the queued GET /orders queries. Then investigate/patch whatever job or maintenance script issued that LOCK TABLE ... pg_sleep(3600) statement (looks like a debug/test artifact or a runaway migration script) so it cannot run against production again; consider adding a statement_timeout/lock_timeout on the orders table's clients to prevent recurrence."
+      },
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 1514,
+        "input_tokens": 13860
+      },
+      "n_tool_calls": 5,
+      "wall_seconds": 21.5,
+      "trajectory": "trajectories/pg-lock/20260829-142809-24fe.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 1
+    },
+    {
+      "system": "baseline",
+      "case": "pg-lock",
+      "model": "claude-sonnet-5",
+      "answer": {
+        "root_cause_component": "worker",
+        "root_cause_type": "code_bug",
+        "explanation": "GET /orders queries the orders table and hangs indefinitely (nginx returns 499 after the 15s client timeout, and the API process never logs a completion for that request), while POST /jobs (which only enqueues to Redis) and GET /health continue to respond normally. The worker log shows it processed exactly one job (\"processed job 553a7bec8c47 in 2.0s\") right after startup and then goes completely silent even though the API/nginx logs show additional POST /jobs 202 responses being enqueued afterward - meaning the worker never picked up or finished processing subsequent jobs. This points to the worker getting stuck mid-transaction while writing a report row after that first job (e.g., a missing commit/rollback, an unhandled exception inside a `BEGIN`, or a long-held row/table lock on the orders table). Because Postgres itself is healthy and accepting connections, the most consistent explanation for \"only /orders hangs, DB is otherwise reachable, and the worker stalls after one job\" is that the worker is holding an open transaction/lock against the orders table that the GET /orders SELECT is blocked waiting on, which will only release when the client (or nginx) gives up.",
+        "evidence": [
+          {
+            "source": "nginx logs",
+            "quote": "172.21.0.7 \"GET /orders HTTP/1.1\" 499 rt=15.002 urt=15.002"
+          },
+          {
+            "source": "nginx logs",
+            "quote": "172.21.0.7 \"POST /jobs HTTP/1.1\" 202 rt=0.003 urt=0.003"
+          },
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:29:10,143 INFO GET /orders -> 200 25ms"
+          },
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:29:11,157 INFO POST /jobs -> 202 2ms"
+          },
+          {
+            "source": "worker logs",
+            "quote": "2026-08-29 14:29:13,183 INFO processed job 553a7bec8c47 in 2.0s"
+          },
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:29:29,180 INFO POST /jobs -> 202 1ms"
+          },
+          {
+            "source": "loadgen logs",
+            "quote": "GET /orders 000 15.002669s"
+          }
+        ],
+        "suggested_fix": "Inspect the worker's job-processing code path for a transaction that is opened but not reliably committed/rolled back (especially around writing report rows tied to orders), and check pg_stat_activity / pg_locks in postgres for a long-running/idle-in-transaction session from the worker holding a lock on the orders table. Add explicit try/finally (or context-managed) transaction handling with a statement/lock timeout in the worker, restart the worker service to release the stuck transaction, and add alerting on 'idle in transaction' sessions and worker heartbeat/job-processing lag to catch this earlier."
+      },
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 2362,
+        "input_tokens": 6175
+      },
+      "wall_seconds": 26.7,
+      "grade": {
+        "component_match": false,
+        "fault_match": false,
+        "correct": false
+      },
+      "repetition": 2
+    },
+    {
+      "system": "agent",
+      "case": "pg-lock",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-143009-e056",
+      "answer": {
+        "root_cause_component": "postgres",
+        "root_cause_type": "other",
+        "explanation": "A stray/rogue session (pid 87) executed `BEGIN; LOCK TABLE orders IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(3600);` and has been holding that exclusive lock on the orders table for over a minute. Every GET /orders request issues `SELECT id, item, status FROM orders ORDER BY id DESC LIMIT 10`, which must wait for a compatible lock and is now queued behind the ACCESS EXCLUSIVE lock, causing requests to hang indefinitely (well past the 15s client timeout) while the connection pool fills with blocked backends. POST /jobs and other endpoints are unaffected because they don't touch the orders table (they only push to the redis queue), so the outage is isolated to /orders as observed. This is not an API or worker code bug, nor a resource-exhaustion issue on the DB host \u2014 it's a long-held table lock from an errant/stuck transaction blocking all readers of that table.",
+        "evidence": [
+          {
+            "source": "exec_readonly psql pg_stat_activity",
+            "quote": "87 | active | Timeout | PgSleep | BEGIN; LOCK TABLE orders IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(3600); | 00:01:06.333277"
+          },
+          {
+            "source": "exec_readonly psql pg_stat_activity",
+            "quote": "88 | active | Lock | relation | SELECT id, item, status FROM orders ORDER BY id DESC LIMIT 10 | 00:01:05.508757"
+          },
+          {
+            "source": "get_logs api",
+            "quote": "2026-08-29 14:29:10,143 INFO GET /orders -> 200 25ms"
+          }
+        ],
+        "suggested_fix": "Identify and terminate the offending backend (e.g. `SELECT pg_terminate_backend(87);`) to release the ACCESS EXCLUSIVE lock on `orders`; audit for the source of that LOCK TABLE/pg_sleep statement (likely a debug/maintenance script or a runaway migration) and prevent it from running against production; add a statement_timeout/lock_timeout on the API's DB role and alerting on long-held locks to catch this earlier."
+      },
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 1517,
+        "input_tokens": 12208
+      },
+      "n_tool_calls": 4,
+      "wall_seconds": 20.8,
+      "trajectory": "trajectories/pg-lock/20260829-143009-e056.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 2
+    },
+    {
+      "system": "baseline",
+      "case": "api-cpu-limit",
+      "model": "claude-sonnet-5",
+      "answer": {
+        "root_cause_component": "api",
+        "root_cause_type": "code_bug",
+        "explanation": "All endpoints (GET /orders and POST /jobs) show latency spiking in lock-step, even though POST /jobs is a trivial \"enqueue\" operation that should stay ~2-5ms, and there is no increase in error rate and no signs of trouble (no slow-query warnings, no connection errors, no resource exhaustion) in postgres or redis. Postgres and redis logs are completely clean/healthy, and the worker is processing queued jobs at a constant, unrelated 2.0s cadence. This pattern - uniform, correlated slowdown across all HTTP paths on a single api process with normal error rates - is the signature of a blocking/synchronous call (e.g., a synchronous DB query or other blocking I/O) executing inside the /orders async handler on uvicorn's single-threaded event loop. While that blocking call runs, it starves the event loop and delays every other in-flight request, including the otherwise-cheap POST /jobs, producing exactly the \"10x latency on ALL endpoints, error rate normal\" symptom in the alert. The downstream services (postgres, redis, worker) show no anomalies, ruling them out as the root cause and pointing back to a code-level defect in the api service itself.",
+        "evidence": [
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:31:13,356 INFO GET /orders -> 200 871ms"
+          },
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:31:14,554 INFO POST /jobs -> 202 90ms"
+          },
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:31:18,855 INFO GET /orders -> 200 2199ms"
+          },
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:31:20,355 INFO POST /jobs -> 202 200ms"
+          },
+          {
+            "source": "postgres logs",
+            "quote": "2026-08-29 14:31:02.479 UTC [1] LOG:  database system is ready to accept connections"
+          },
+          {
+            "source": "worker logs",
+            "quote": "worker-1  | 2026-08-29 14:31:12,507 INFO processed job 58ca5f7ef4fb in 2.0s"
+          },
+          {
+            "source": "alert",
+            "quote": "HighLatency: latency degraded more than 10x on ALL api endpoints (multi-second responses, normal <100ms). Error rate normal."
+          }
+        ],
+        "suggested_fix": "Audit the /orders handler in api.py for any synchronous/blocking call (e.g., a non-async DB driver call, time.sleep, or CPU-heavy loop) executing inside an async def route on uvicorn's single worker/event loop. Convert the DB access to a truly async driver (e.g., asyncpg or SQLAlchemy async engine) or offload the blocking work to a thread pool (run_in_executor / FastAPI's threadpool), and consider running uvicorn with multiple workers to isolate slow requests. Add request-level tracing/timing around the DB call in /orders to confirm the blocking point before deploying the fix."
+      },
+      "usage": {
+        "input_tokens": 7341,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 2365,
+        "cache_read_input_tokens": 0
+      },
+      "wall_seconds": 26.7,
+      "grade": {
+        "component_match": true,
+        "fault_match": false,
+        "correct": false
+      },
+      "repetition": 0
+    },
+    {
+      "system": "agent",
+      "case": "api-cpu-limit",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-143208-5e93",
+      "answer": {
+        "root_cause_component": "api",
+        "root_cause_type": "misconfiguration",
+        "explanation": "All api endpoints (GET /orders, POST /jobs, even /health) show a uniform multi-second slowdown with no increase in error rate, and no smoking gun was found downstream: postgres has no long-running/blocking transactions and tiny tables (12-14 rows), redis queue is empty (llen jobs = 0) and its stats are unremarkable, and network connectivity from api to postgres is fine (TCP connect OK). CPU/memory usage reported by `docker stats` for the api container was low in absolute terms, but `docker inspect api` reveals the container has been started with `\"NanoCpus\": 10000000`, i.e. a hard CPU quota of just 0.01 vCPU. With such a tiny CPU allocation, the single-process uvicorn api container gets CPU-throttled by the cgroup scheduler under any concurrent load from the load generator, so every request (regardless of which endpoint or how little DB/Redis work it does) queues up waiting for CPU time slices, producing the across-the-board 10x+ latency degradation while requests still eventually succeed (explaining the normal error rate) and the health check itself times out (container status 'unhealthy', 'Health check exceeded timeout (5s)'). Postgres and redis, which have no such CPU caps, remain fast and unblocked, confirming the bottleneck is the api container's CPU cgroup limit, not its dependencies.",
+        "evidence": [
+          {
+            "source": "get_status",
+            "quote": "incident-lab-api-1        incident-lab-api         \"uvicorn api:app --h\u2026\"   api        About a minute ago   Up About a minute (unhealthy)"
+          },
+          {
+            "source": "docker inspect api",
+            "quote": "\"NanoCpus\": 10000000,"
+          },
+          {
+            "source": "docker inspect api",
+            "quote": "\"Output\": \"Health check exceeded timeout (5s)\""
+          },
+          {
+            "source": "get_logs api",
+            "quote": "GET /orders -> 200 2199ms"
+          },
+          {
+            "source": "exec_readonly psql pg_stat_activity",
+            "quote": "pid | state  | wait_event_type | wait_event |  ... duration \n-----+--------+... \n 206 | active |                 |            | ... | 00:00:00"
+          },
+          {
+            "source": "exec_readonly redis-cli llen jobs",
+            "quote": "0"
+          },
+          {
+            "source": "probe_connectivity api->postgres",
+            "quote": "tcp: connect 172.21.0.3:5432 OK"
+          }
+        ],
+        "suggested_fix": "Remove or raise the CPU limit on the api service (the `--cpus`/`nano_cpus` / `deploy.resources.limits.cpus` setting in docker-compose.yml is set to ~0.01 CPU). Restore it to an unrestricted value or a realistic limit (e.g. 1-2 CPUs) and redeploy the api container; verify with `docker inspect api` that NanoCpus/CpuQuota reflects the intended limit, then confirm latency returns to baseline."
+      },
+      "usage": {
+        "input_tokens": 100037,
+        "output_tokens": 5540,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0
+      },
+      "n_tool_calls": 16,
+      "wall_seconds": 108.3,
+      "trajectory": "trajectories/api-cpu-limit/20260829-143208-5e93.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 0
+    },
+    {
+      "system": "baseline",
+      "case": "api-cpu-limit",
+      "model": "claude-sonnet-5",
+      "answer": {
+        "root_cause_component": "api",
+        "root_cause_type": "code_bug",
+        "explanation": "All API endpoints (GET /orders and POST /jobs) show synchronized, steadily growing latency even though nginx, postgres, redis and the worker report no errors and postgres/redis logs show clean startup with no slow-query or connection-saturation messages. The API log shows only a single uvicorn worker process (\"Started server process [1]\" / \"Uvicorn running on http://0.0.0.0:8000\") with no additional worker processes configured, and the per-request latencies for unrelated endpoints (orders read vs jobs enqueue) rise and fall in lock-step (e.g., 795ms/89ms, then 2300ms/300ms, then 2000ms/492ms). This pattern is the signature of a blocking (synchronous) call being made inside an async request handler on a single-process/single-event-loop server: each blocking call monopolizes the event loop, so unrelated concurrent requests queue up behind it and all endpoints degrade together in proportion to concurrent load, without any actual errors or downstream latency (postgres and redis logs show completely normal, fast, error-free operation). Because downstream services are healthy and fast, the delay must be introduced inside the api process itself, consistent with a code-level blocking bug rather than resource exhaustion in redis/postgres/nginx.",
+        "evidence": [
+          {
+            "source": "api logs",
+            "quote": "api-1  | INFO:     Started server process [1]"
+          },
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:34:39,905 INFO GET /orders -> 200 795ms"
+          },
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:34:41,004 INFO POST /jobs -> 202 89ms"
+          },
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:34:45,403 INFO GET /orders -> 200 2300ms"
+          },
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:34:47,104 INFO POST /jobs -> 202 300ms"
+          },
+          {
+            "source": "postgres logs",
+            "quote": "2026-08-29 14:34:29.216 UTC [1] LOG:  database system is ready to accept connections"
+          },
+          {
+            "source": "redis logs",
+            "quote": "1:M 29 Aug 2026 14:34:26.698 * Ready to accept connections tcp"
+          },
+          {
+            "source": "nginx logs",
+            "quote": "172.21.0.7 \"GET /orders HTTP/1.1\" 200 rt=2.490 urt=2.489"
+          }
+        ],
+        "suggested_fix": "Audit the api request handlers for synchronous/blocking calls (e.g., a blocking DB driver call, time.sleep, or CPU-bound work) executed directly in the async event loop; move them to a threadpool executor or replace with a true async driver (e.g., asyncpg) so the event loop is not blocked. Also consider running uvicorn with multiple worker processes/threads (--workers N) as a stop-gap to isolate blocking requests, but the underlying blocking call in the code is the real fix needed."
+      },
+      "usage": {
+        "input_tokens": 7237,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 2267,
+        "cache_read_input_tokens": 0
+      },
+      "wall_seconds": 26.5,
+      "grade": {
+        "component_match": true,
+        "fault_match": false,
+        "correct": false
+      },
+      "repetition": 1
+    },
+    {
+      "system": "agent",
+      "case": "api-cpu-limit",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-143534-3e13",
+      "answer": {
+        "root_cause_component": "api",
+        "root_cause_type": "misconfiguration",
+        "explanation": "All api endpoints are slow (not just DB-backed ones), postgres and redis show no load, no lock contention, no connection exhaustion (only 7/100 pg connections, 3 redis clients), and TCP connectivity to postgres is instant \u2014 ruling out the dependencies as the bottleneck. `docker inspect api` reveals the container was started with `NanoCpus: 10000000`, i.e. a hard CPU cgroup cap of 0.01 vCPU (1% of a core). `docker stats` confirms the api container is pegged at ~0.93% CPU, sitting right at that cap, while every other container has negligible CPU usage and plenty of headroom. Under this CPU starvation, the single-threaded/async event loop and its worker threadpool (used for the blocking psycopg.connect() calls) can barely get scheduled, so even trivial requests and the health check take seconds instead of milliseconds, and occasional psycopg connect() calls exceed their 2s timeout not because postgres is slow but because the api process itself doesn't get CPU time to complete the syscall/handshake promptly. This uniformly inflates latency across every endpoint (GET /orders, POST /jobs, /health) while error rates stay normal, exactly matching the alert.",
+        "evidence": [
+          {
+            "source": "exec_readonly docker inspect api",
+            "quote": "\"NanoCpus\": 10000000,"
+          },
+          {
+            "source": "exec_readonly docker stats",
+            "quote": "99d8ba2121a6   incident-lab-api-1        0.93%     45.64MiB / 62.47GiB"
+          },
+          {
+            "source": "get_status",
+            "quote": "incident-lab-api-1        incident-lab-api         \"uvicorn api:app --h\u2026\"   api        About a minute ago   Up About a minute (unhealthy)"
+          },
+          {
+            "source": "exec_readonly docker inspect api",
+            "quote": "\"Output\": \"Health check exceeded timeout (5s)\""
+          },
+          {
+            "source": "get_logs loadgen",
+            "quote": "GET /orders 200 2.791994s\nPOST /jobs 202 0.791335s\nGET /orders 500 4.591968s"
+          },
+          {
+            "source": "exec_readonly psql pg_stat_activity",
+            "quote": " count \n-------\n     7\n(1 row)"
+          }
+        ],
+        "suggested_fix": "Remove or raise the CPU limit on the api service in docker-compose (the NanoCpus/cpus setting is effectively capping it at 1% of a core). Restore it to an unconstrained or realistically sized limit (e.g. 1-2 vCPUs), then redeploy/restart the api container and confirm docker stats shows healthy CPU headroom and latency returns to <100ms."
+      },
+      "usage": {
+        "input_tokens": 104710,
+        "output_tokens": 5341,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0
+      },
+      "n_tool_calls": 16,
+      "wall_seconds": 101.0,
+      "trajectory": "trajectories/api-cpu-limit/20260829-143534-3e13.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 1
+    },
+    {
+      "system": "baseline",
+      "case": "api-cpu-limit",
+      "model": "claude-sonnet-5",
+      "answer": {
+        "root_cause_component": "worker",
+        "root_cause_type": "resource_exhaustion",
+        "explanation": "All API endpoints (nginx -> api) show a uniform, correlated slowdown that appears and disappears in lock-step with the worker's job cycle, while error rates stay normal and every service reports healthy - this rules out a crash or network failure and points to contention on a shared resource (Postgres connections/locks) rather than an application bug in the API itself. The worker logs show it consistently takes exactly 2.0s to \"process\" each job that writes a report to Postgres, and the API's GET /orders (and to a lesser extent POST /jobs) latency spikes into the 1-2.5s range at the same cadence the worker is active, then partially recovers between worker runs. This is the signature of the worker holding a long-running transaction/lock (or a checked-out DB connection) for the full 2s of \"processing\" per job, which serializes/blocks the API's Postgres queries (GET /orders reads from the same tables/connection pool the worker writes to), producing the observed 10x latency across all endpoints without generating errors. Because the worker fires a new job every ~4-6s and each hogs the shared DB resource for 2s, the effect is a recurring, queueing-style latency multiplier on the API tier that looks like \"API is slow\" but originates from the worker's DB usage pattern.",
+        "evidence": [
+          {
+            "source": "worker logs",
+            "quote": "2026-08-29 14:37:57,738 INFO processed job 174be2a030fb in 2.0s"
+          },
+          {
+            "source": "worker logs",
+            "quote": "2026-08-29 14:38:01,377 INFO processed job 08648d6912d7 in 2.0s"
+          },
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:38:04,134 INFO GET /orders -> 200 2501ms"
+          },
+          {
+            "source": "api logs",
+            "quote": "2026-08-29 14:38:05,734 INFO POST /jobs -> 202 400ms"
+          },
+          {
+            "source": "nginx logs",
+            "quote": "172.21.0.7 \"GET /orders HTTP/1.1\" 200 rt=2.593 urt=2.592"
+          },
+          {
+            "source": "loadgen logs",
+            "quote": "GET /orders 200 2.593425s"
+          }
+        ],
+        "suggested_fix": "Inspect the worker's job-processing transaction against Postgres: shorten or remove the long-held transaction/lock (avoid holding a DB connection or row/table lock for the full 2s of work - do the heavy lifting outside the transaction and only hold the lock for the final write), add appropriate indexes so writes don't lock broad ranges, and consider giving the worker its own connection pool separate from the API so a busy worker cannot starve API request connections. Also verify pool size settings (e.g., SQLAlchemy pool_size/max_overflow) so the API isn't queueing for connections held by the worker."
+      },
+      "usage": {
+        "input_tokens": 7338,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 2849,
+        "cache_read_input_tokens": 0
+      },
+      "wall_seconds": 33.8,
+      "grade": {
+        "component_match": false,
+        "fault_match": true,
+        "correct": false
+      },
+      "repetition": 2
+    },
+    {
+      "system": "agent",
+      "case": "api-cpu-limit",
+      "model": "claude-sonnet-5",
+      "run_id": "20260829-143900-2b88",
+      "answer": {
+        "root_cause_component": "api",
+        "root_cause_type": "resource_exhaustion",
+        "explanation": "All api endpoints\u2014including /health, which does almost no work\u2014show a uniform, escalating latency increase over the observation window (17ms \u2192 3501ms) while error rates stay normal, ruling out a slow query, connection-pool exhaustion, or backend outage (postgres and redis are healthy, tables are tiny with sub-millisecond scans, and no long-running queries were found in pg_stat_activity). Inspecting the api container's runtime config revealed a docker CPU limit of NanoCpus=10000000, i.e. only 0.01 of a CPU core allocated to the api container. Under the steady load generated by loadgen, the api process is being CPU-throttled by the cgroup CFS quota: every request (DB call, redis push, JSON serialization, even the trivial /health handler) now has to wait for scarce CPU time slices, producing latency that grows across ALL endpoints uniformly and explains why the healthcheck itself started timing out (container shows 'unhealthy' with 'Health check exceeded timeout (5s)'). This is consistent with a resource constraint on the api service itself rather than a downstream dependency problem.",
+        "evidence": [
+          {
+            "source": "exec_readonly docker inspect api",
+            "quote": "\"NanoCpus\": 10000000,"
+          },
+          {
+            "source": "get_logs api",
+            "quote": "2026-08-29 14:39:07,635 INFO GET /health -> 200 3501ms"
+          },
+          {
+            "source": "exec_readonly docker inspect api",
+            "quote": "\"Output\": \"Health check exceeded timeout (5s)\""
+          },
+          {
+            "source": "exec_readonly psql pg_stat_user_tables",
+            "quote": "orders  |         12 |       17 |          192 |       17 | 32 kB"
+          },
+          {
+            "source": "get_status",
+            "quote": "incident-lab-api-1        incident-lab-api         \"uvicorn api:app --h\u2026\"   api        About a minute ago   Up About a minute (unhealthy)"
+          }
+        ],
+        "suggested_fix": "Remove or substantially raise the CPU limit on the api service (docker-compose 'deploy.resources.limits.cpus' or '--cpus'), e.g. set to at least 1-2 CPUs, then redeploy and confirm latency returns to baseline (<100ms) and the healthcheck stops failing."
+      },
+      "usage": {
+        "input_tokens": 35809,
+        "output_tokens": 3891,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0
+      },
+      "n_tool_calls": 8,
+      "wall_seconds": 57.7,
+      "trajectory": "trajectories/api-cpu-limit/20260829-143900-2b88.jsonl",
+      "grade": {
+        "component_match": true,
+        "fault_match": true,
+        "correct": true
+      },
+      "repetition": 2
+    }
+  ]
+}
