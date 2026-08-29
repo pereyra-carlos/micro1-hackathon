@@ -103,6 +103,7 @@ the git history is the pre-registration evidence.
 | v1 — **reverted** | Prompt rule: prefer verified state over traceback-inferred code | v2 (agent only; baseline frozen) | 14/18 | (12/18) | `results/20260829-v1-agent/` |
 | v2 | New tool: probe_connectivity (DNS + TCP from inside a container) | v2 (agent only; baseline frozen) | **18/18** | (12/18) | `results/20260829-025117/` |
 | v2 + tool fixes | Eval set v3: 4 probe-blind cases (10 total) | v3 additions, both systems | **12/12** new · **30/30** overall | 5/12 new · 17/30 overall | `results/20260829-v3-newcases/` |
+| v3: prompt caching | cache_control on static prefix + conversation tail; no behavioral change | v3 all 10 cases, agent only | 29/30 (miss within noise) · **$0.077/run vs $0.128 uncached, −40%** | (frozen) | `results/20260829-144721/` |
 
 All runs: model `claude-sonnet-5`, N=3 per case per system.
 
@@ -153,6 +154,16 @@ prompt is unchanged since v0. Honest caveat: v3 widened the agent-vs-baseline
 gap (its actual purpose) but did **not** restore headroom over the current
 agent, which saturates 30/30 — harder case families (flapping faults,
 multi-fault incidents, red-herring changes) remain future work.
+
+**Agent v3 (prompt caching, kept):** one explicit cache breakpoint on the
+static tools+system prefix plus automatic caching following the conversation
+tail — no behavioral change, verified by the healthy-loop usage signature
+(full-price input collapses to ~2 tokens per call; cache reads grow turn
+over turn). On the full 10-case sweep the mean cost per diagnosis fell from
+$0.128 to $0.077 (−40% on identical workload, cache pricing: reads 0.1×,
+5-min writes 1.25×). Accuracy 29/30: the one miss is pg-lock graded
+`postgres/misconfiguration` — right component, fault enum outside the
+accepted set — which is N=3 noise, not a regression signal.
 
 `results/20260828-200028/` is an intermediate sweep kept for the record: it
 exposed that the original pg-connections design made the ground truth

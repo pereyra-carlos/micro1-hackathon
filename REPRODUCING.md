@@ -78,6 +78,7 @@ Token prices: claude-sonnet-5 at $2/M input, $10/M output (Aug 2026).
 | --- | --- | --- | --- | --- |
 | Both systems, 6 cases, N=3 (`results/20260828-205644`) | 36 | 1.64M / 131k | ~$4.60 | ~48 min |
 | Agent only, 6 cases, N=3 (`results/20260829-025117`) | 18 | 0.95M / 66k | ~$2.56 | ~36 min |
+| Agent only, 10 cases, N=3, prompt caching (`results/20260829-144721`) | 30 | 1.36M prompt (0.97M served from cache) / 112k | ~$2.30 | ~60 min |
 
 Wall clock is dominated by lab resets and symptom settle time (18 resets per
 sweep), not by the LLM calls. Costs scale with the agent version: the v1
