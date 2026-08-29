@@ -65,11 +65,17 @@ def diagnose(case: dict, run_id: str | None = None) -> dict:
     for step in range(MAX_LLM_CALLS):
         if step == MAX_LLM_CALLS - 1:
             messages.append({"role": "user", "content": WRAP_UP})
+        # Prompt caching: an explicit breakpoint after the static prefix
+        # (tools render before system, so this covers both) plus top-level
+        # automatic caching that follows the growing conversation tail, so
+        # each turn re-reads prior turns at ~0.1x price instead of full price.
         response = api.messages.create(
             model=llm.MODEL,
             max_tokens=llm.MAX_TOKENS,
-            system=SYSTEM,
+            system=[{"type": "text", "text": SYSTEM,
+                     "cache_control": {"type": "ephemeral"}}],
             tools=tool_defs,
+            cache_control={"type": "ephemeral"},
             messages=messages,
         )
         usage = llm.add_usage(usage, llm.usage_dict(response))
